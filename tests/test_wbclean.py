@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -212,6 +213,90 @@ class PathMappingTests(unittest.TestCase):
     def test_outside_path_rejected(self):
         self.assertFalse(mod.safe_under("/etc/passwd", mod.PROJECTS_DIR))
         self.assertFalse(mod.safe_under("/tmp", mod.PROJECTS_DIR))
+
+
+class CacheTests(unittest.TestCase):
+    """缓存清理 —— 白名单与受保护目录的护栏。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.orig_home = mod.APP_HOME
+        mod.APP_HOME = self.tmp
+
+    def tearDown(self):
+        mod.APP_HOME = self.orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make(self, rel, size=1024):
+        full = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(full) or self.tmp, exist_ok=True)
+        if full.endswith("/"):
+            os.makedirs(full, exist_ok=True)
+            return full
+        with open(full, "wb") as f:
+            f.write(b"\0" * size)
+        return full
+
+    def test_targets_cover_safe_and_deep(self):
+        rows = mod.cache_targets()
+        levels = set(r["level"] for r in rows)
+        self.assertEqual(levels, {"safe", "deep"})
+        names = [r["name"] for r in rows]
+        self.assertIn("logs", names)
+        self.assertIn("cache", names)
+
+    def test_protected_paths_never_in_targets(self):
+        """护栏：用户数据目录绝不能出现在清理白名单里。"""
+        names = [r["name"] for r in mod.cache_targets()]
+        forbidden = {"blobs", "projects", "app/session", "workbuddy.db",
+                     "workspace", "artifact", "user"}
+        for bad in forbidden:
+            self.assertNotIn(bad, names,
+                             "受保护路径 %s 不该出现在清理白名单" % bad)
+
+    def test_targets_follow_app_home(self):
+        """--app-home 改 APP_HOME 后，目标路径必须跟着变。"""
+        rows = mod.cache_targets()
+        for r in rows:
+            self.assertTrue(r["path"].startswith(self.tmp),
+                            "%s 未跟随 APP_HOME" % r["name"])
+
+    def test_purge_removes_everything(self):
+        self._make("logs/a.log")
+        self._make("logs/sub/b.log")
+        freed = mod.purge_dir_contents(os.path.join(self.tmp, "logs"))
+        self.assertGreater(freed, 0)
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "logs")), [])
+
+    def test_purge_keeps_directory_itself(self):
+        self._make("cache/x.json")
+        mod.purge_dir_contents(os.path.join(self.tmp, "cache"))
+        self.assertTrue(os.path.isdir(os.path.join(self.tmp, "cache")))
+
+    def test_purge_by_date_respects_keep_days(self):
+        today = time.strftime("%Y-%m-%d")
+        old = time.strftime("%Y-%m-%d", time.localtime(time.time() - 10 * 86400))
+        recent = time.strftime("%Y-%m-%d", time.localtime(time.time() - 1 * 86400))
+        for d in (old, recent, today):
+            self._make("logs/%s/x.log" % d)
+
+        mod.purge_dir_contents(os.path.join(self.tmp, "logs"),
+                               keep_days=3, by_date=True)
+        left = set(os.listdir(os.path.join(self.tmp, "logs")))
+        self.assertNotIn(old, left, "10 天前的日志应被删除")
+        self.assertIn(recent, left, "1 天前的日志应保留")
+        self.assertIn(today, left, "今天的日志应保留")
+
+    def test_purge_by_date_zero_keep_days_removes_all(self):
+        today = time.strftime("%Y-%m-%d")
+        self._make("logs/%s/x.log" % today)
+        mod.purge_dir_contents(os.path.join(self.tmp, "logs"),
+                               keep_days=0, by_date=True)
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "logs")), [])
+
+    def test_purge_missing_dir_is_noop(self):
+        self.assertEqual(
+            mod.purge_dir_contents(os.path.join(self.tmp, "nope")), 0)
 
 
 if __name__ == "__main__":

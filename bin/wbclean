@@ -40,6 +40,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -48,7 +49,7 @@ import time
 import unicodedata
 from types import SimpleNamespace
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 APP_HOME = os.path.expanduser("~/.workbuddy-ai")
 DB_PATH = os.path.join(APP_HOME, "workbuddy.db")
@@ -951,6 +952,247 @@ def cmd_report(args):
         print(text)
 
 
+# ============================================================ 命令：cache
+
+# 缓存清理白名单。**只有**列在这里的目录会被删除，其余一律不碰。
+# level: safe = 应用会自动重建；deep = 会丢失部分历史能力，必须显式 --deep
+def cache_targets():
+    """每次调用重新构造 —— --app-home 会改 APP_HOME，模块级常量会失效。"""
+    home = APP_HOME
+    return [
+        {
+            "name": "logs", "label": "应用运行日志",
+            "path": os.path.join(home, "logs"), "level": "safe",
+            "note": "运行日志与沙箱日志，删除不影响功能", "by_date": True,
+        },
+        {
+            "name": "cache", "label": "产品配置与会话快照",
+            "path": os.path.join(home, "cache"), "level": "safe",
+            "note": "应用会自动重新拉取",
+        },
+        {
+            "name": "app/cache", "label": "渲染进程缓存",
+            "path": os.path.join(home, "app", "cache"), "level": "safe",
+            "note": "Electron 渲染缓存，可安全删除",
+        },
+        {
+            "name": "file-history", "label": "文件回滚历史",
+            "path": os.path.join(home, "file-history"), "level": "deep",
+            "note": "删除后无法回滚历史文件改动",
+        },
+        {
+            "name": "changes-detail", "label": "变更详情",
+            "path": os.path.join(home, "changes-detail"), "level": "deep",
+            "note": "删除后历史变更记录不可查看",
+        },
+        {
+            "name": "artifact-index", "label": "产物索引",
+            "path": os.path.join(home, "artifact-index"), "level": "deep",
+            "note": "删除后产物列表需要重建",
+        },
+    ]
+
+
+# 护栏：无论什么参数都不会被删除。仅用于展示，也提醒读代码的人别往白名单里乱加。
+PROTECTED_DIRS = [
+    ("blobs", "用户上传的图片附件"),
+    ("projects", "会话历史记录"),
+    ("app/session", "登录态与会话状态"),
+    ("workbuddy.db", "数据库本体"),
+]
+
+
+def entry_size(path):
+    if os.path.islink(path):
+        return 0
+    if os.path.isdir(path):
+        return dir_size(path)
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def purge_dir_contents(path, keep_days=0, by_date=False):
+    """清空目录内容，保留目录本身。返回释放字节数。
+
+    by_date=True 时，形如 2026-10-28 的子目录按天数保留。
+    """
+    if not os.path.isdir(path):
+        return 0
+
+    cutoff = ""
+    if by_date and keep_days > 0:
+        cutoff = time.strftime(
+            "%Y-%m-%d", time.localtime(time.time() - keep_days * 86400))
+
+    freed = 0
+    for entry in sorted(os.listdir(path)):
+        full = os.path.join(path, entry)
+        if by_date and cutoff and re.match(r"^\d{4}-\d{2}-\d{2}$", entry):
+            if entry >= cutoff:          # YYYY-MM-DD 字典序即时间序
+                continue
+        size = entry_size(full)
+        try:
+            if os.path.isdir(full) and not os.path.islink(full):
+                shutil.rmtree(full)
+            else:
+                os.remove(full)
+            freed += size
+        except OSError:
+            pass
+    return freed
+
+
+def log_breakdown(path, limit=4):
+    """日志目录里占大头的子项，用于展示。"""
+    if not os.path.isdir(path):
+        return []
+    items = [(e, entry_size(os.path.join(path, e))) for e in os.listdir(path)]
+    items.sort(key=lambda kv: -kv[1])
+    rows = items[:limit]
+    rest = sum(s for _n, s in items[limit:])
+    if rest:
+        rows.append(("其他", rest))
+    return rows
+
+
+def collect_cache_rows():
+    rows = []
+    for t in cache_targets():
+        exists = os.path.isdir(t["path"])
+        rows.append(dict(t, exists=exists,
+                         size=entry_size(t["path"]) if exists else 0))
+    return rows
+
+
+def cmd_cache(args):
+    rows = collect_cache_rows()
+    safe_rows = [r for r in rows if r["level"] == "safe"]
+    deep_rows = [r for r in rows if r["level"] == "deep"]
+    safe_total = sum(r["size"] for r in safe_rows)
+    deep_total = sum(r["size"] for r in deep_rows)
+
+    # ---------- 只读：展示
+    if not args.clean:
+        print()
+        hr("═")
+        print(C_B + "  缓存与日志占用" + C_0)
+        hr("═")
+
+        print("\n  " + C_OK + "安全清理" + C_0 + "（应用会自动重建）")
+        for r in safe_rows:
+            if not r["exists"] or r["size"] == 0:
+                continue
+            print("    %-18s %10s   %s" % (r["name"], human_size(r["size"]),
+                                          C_DIM + r["label"] + C_0))
+            if r.get("by_date"):
+                for sub, size in log_breakdown(r["path"]):
+                    print("      %s%-16s %10s%s"
+                          % (C_DIM, "└ " + sub, human_size(size), C_0))
+        print("    %-18s %10s" % ("─" * 16, "─" * 8))
+        print("    %-18s %10s" % ("小计", human_size(safe_total)))
+
+        print("\n  " + C_WARN + "深度清理" + C_0 + "（会丢失部分历史能力）")
+        for r in deep_rows:
+            if not r["exists"] or r["size"] == 0:
+                continue
+            print("    %-18s %10s   %s" % (r["name"], human_size(r["size"]),
+                                          C_DIM + r["note"] + C_0))
+        print("    %-18s %10s" % ("─" * 16, "─" * 8))
+        print("    %-18s %10s" % ("小计", human_size(deep_total)))
+
+        prot = []
+        for name, desc in PROTECTED_DIRS:
+            full = os.path.join(APP_HOME, name)
+            if os.path.exists(full):
+                prot.append((name, desc, entry_size(full)))
+        if prot:
+            print("\n  " + C_DIM + "受保护（不会被删除）" + C_0)
+            for name, desc, size in prot:
+                print("    %-18s %10s   %s%s%s"
+                      % (name, human_size(size), C_DIM, desc, C_0))
+
+        print()
+        print("  可释放：安全项 %s" % human_size(safe_total)
+              + ("，含深度项共 %s" % human_size(safe_total + deep_total)
+                 if deep_total else ""))
+        print()
+        print("  " + C_B + "清理命令" + C_0)
+        print("    wbclean cache --clean                只清安全项")
+        print("    wbclean cache --clean --dry-run      先看会删什么")
+        print("    wbclean cache --clean --keep-days 3  日志保留最近 3 天")
+        print("    wbclean cache --clean --deep         连历史记录一起清")
+        print()
+        return
+
+    # ---------- 写入：清理
+    print()
+    hr("═")
+    print(C_B + ("  深度清理缓存与日志" if args.deep else "  安全清理缓存与日志") + C_0)
+    hr("═")
+
+    selected = list(safe_rows) + (deep_rows if args.deep else [])
+    selected = [r for r in selected if r["exists"] and r["size"] > 0]
+
+    if not selected:
+        print("\n  " + C_OK + "没有需要清理的内容。" + C_0 + "\n")
+        return
+
+    total = sum(r["size"] for r in selected)
+
+    print("\n  将清理：")
+    for r in selected:
+        tag = "" if r["level"] == "safe" else "  " + C_WARN + "[深度]" + C_0
+        print("    %-18s %10s%s" % (r["name"], human_size(r["size"]), tag))
+    print("    %-18s %10s" % ("─" * 16, "─" * 8))
+    print("    %-18s %10s" % ("合计", human_size(total)))
+    if args.keep_days:
+        print("\n  日志保留最近 %d 天" % args.keep_days)
+
+    if args.dry_run:
+        print("\n" + C_WARN + "[预览模式] 未删除任何内容。" + C_0 + "\n")
+        return
+
+    print("\n[1/2] 检查运行状态 ...")
+    require_app_closed(args.db, getattr(args, "skip_process_check", False))
+
+    if not args.yes:
+        print()
+        print("  " + C_WARN + "这些内容删除后不可恢复"
+              + ("，深度项还会丢失回滚能力" if args.deep else "") + "。" + C_0)
+        print("  不影响你的文件、会话记录和图片附件。")
+        print()
+        try:
+            answer = input("  输入 yes 执行，其他任意键取消: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n  已取消。\n")
+            return
+        if answer != "yes":
+            print("\n  已取消，未做任何修改。\n")
+            return
+
+    print("\n[2/2] 清理 ...")
+    freed_total = 0
+    for r in selected:
+        # 二次护栏：目标必须在数据目录之内
+        if not safe_under(r["path"], APP_HOME):
+            print("    " + C_WARN + "跳过（不在数据目录内）：%s" % r["path"] + C_0)
+            continue
+        freed = purge_dir_contents(
+            r["path"], keep_days=args.keep_days,
+            by_date=r.get("by_date", False))
+        freed_total += freed
+        print("    %-18s 释放 %10s" % (r["name"], human_size(freed)))
+
+    print()
+    hr("═")
+    print(C_B + "  完成" + C_0 + "，共释放 " + C_OK + human_size(freed_total) + C_0)
+    hr("═")
+    print("  重新打开 WorkBuddy 后这些目录会重建，属正常现象。")
+    print()
+
+
 # ============================================================ 命令：menu
 
 # (编号, 名称, 状态标签, 标签颜色, 补充说明)
@@ -958,10 +1200,12 @@ MENU_ITEMS = [
     ("1", "诊断当前状态", "随时可用", C_OK, "，不用退应用"),
     ("2", "清理空壳条目", "需先退出", C_WARN, " WorkBuddy"),
     ("3", "清理并删历史文件", "需先退出", C_WARN, " WorkBuddy，多省几 MB"),
-    ("4", "备份数据库", "随时可用", C_OK, "，随时能跑"),
-    ("5", "查看磁盘占用", "随时可用", C_OK, "，随时能跑"),
-    ("6", "从备份还原", "需先退出", C_WARN, " WorkBuddy"),
-    ("7", "导出诊断报告", "随时可用", C_OK, "，反馈问题用"),
+    ("4", "安全清理缓存", "需先退出", C_WARN, " WorkBuddy，日志与缓存"),
+    ("5", "深度清理缓存", "需先退出", C_WARN, " WorkBuddy，会丢回滚"),
+    ("6", "备份数据库", "随时可用", C_OK, "，随时能跑"),
+    ("7", "查看磁盘占用", "随时可用", C_OK, "，随时能跑"),
+    ("8", "从备份还原", "需先退出", C_WARN, " WorkBuddy"),
+    ("9", "导出诊断报告", "随时可用", C_OK, "，反馈问题用"),
 ]
 
 MENU_RULE = 62
@@ -998,16 +1242,22 @@ def cmd_menu(args):
             db=args.db, dry_run=False, yes=False, history=False, sessions=False)),
         "3": (cmd_clean, lambda: SimpleNamespace(
             db=args.db, dry_run=False, yes=False, history=True, sessions=False)),
-        "4": (cmd_backup, lambda: SimpleNamespace(db=args.db)),
-        "5": (cmd_stats, lambda: SimpleNamespace(db=args.db)),
-        "7": (cmd_report, lambda: SimpleNamespace(db=args.db, format="text",
+        "4": (cmd_cache, lambda: SimpleNamespace(
+            db=args.db, clean=True, deep=False, keep_days=0,
+            dry_run=False, yes=False)),
+        "5": (cmd_cache, lambda: SimpleNamespace(
+            db=args.db, clean=True, deep=True, keep_days=0,
+            dry_run=False, yes=False)),
+        "6": (cmd_backup, lambda: SimpleNamespace(db=args.db)),
+        "7": (cmd_stats, lambda: SimpleNamespace(db=args.db)),
+        "9": (cmd_report, lambda: SimpleNamespace(db=args.db, format="text",
                                                    output=None)),
     }
 
     while True:
         render_menu()
         try:
-            choice = input(MENU_INDENT + C_DIM + "请选择 [0-7]: " + C_0).strip()
+            choice = input(MENU_INDENT + C_DIM + "请选择 [0-9]: " + C_0).strip()
         except (KeyboardInterrupt, EOFError):
             print()
             return
@@ -1015,7 +1265,7 @@ def cmd_menu(args):
         if choice in ("0", "q", ""):
             return
 
-        if choice == "6":
+        if choice == "8":
             print("\033[2J\033[H", end="")
             cmd_restore(SimpleNamespace(
                 db=args.db, name=None, yes=False,
@@ -1097,6 +1347,17 @@ def build_parser():
                     help="输出格式（默认 text）")
     sp.add_argument("--output", "-o", help="写入文件而非打印")
     sp.set_defaults(func=cmd_report)
+
+    sp = sub.add_parser("cache", help="查看并清理缓存与日志")
+    sp.add_argument("--clean", action="store_true",
+                    help="执行清理（默认只显示占用）")
+    sp.add_argument("--deep", action="store_true",
+                    help="连 file-history / changes-detail / artifact-index 一起清")
+    sp.add_argument("--keep-days", type=int, default=0, metavar="N",
+                    help="日志保留最近 N 天（默认 0，全部删除）")
+    sp.add_argument("--dry-run", action="store_true", help="只预览，不删除")
+    sp.add_argument("--yes", action="store_true", help="跳过交互确认")
+    sp.set_defaults(func=cmd_cache)
 
     return p
 
