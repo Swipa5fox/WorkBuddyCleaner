@@ -1,0 +1,35 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        python: ["3.9", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 运行单元测试
+        run: python3 tests/test_wbclean.py
+
+      - name: 语法检查
+        run: python3 -m py_compile bin/wbclean
+
+      - name: 命令行自检（无 WorkBuddy 环境）
+        run: |
+          python3 bin/wbclean --version
+          python3 bin/wbclean report --format json | python3 -c "import json,sys; d=json.load(sys.stdin); print('report JSON 合法，schema_ok =', d['app']['schema_ok'])"
