@@ -37,7 +37,7 @@ WorkBuddy 的侧边栏「空间」分组只提供逐条右键「从列表中移�
 需要 **Python 3.7+**（只用标准库，无需 pip install）。
 
 ```bash
-git clone https://github.com/<你的账号>/wbclean.git
+git clone https://github.com/OWNER/wbclean.git   # 换成实际仓库地址
 cd wbclean
 ./install.sh
 ```
@@ -55,7 +55,7 @@ wbclean --version
 wbclean scan
 ```
 
-> macOS 12.3 以下 `~/.local/bin` 不在 PATH 里，
+> 装完如果提示 `command not found: wbclean`，说明 `~/.local/bin` 不在 PATH 里，
 > `install.sh` 会提示你把对应那行加进 `~/.zshrc`。
 
 ---
@@ -80,7 +80,7 @@ wbclean scan
 wbclean menu
 ```
 
-或者直接双击仓库里的 `bin/wbclean`（macOS 会用 Terminal 打开）。
+或者双击仓库根目录的 `wbclean.command`（macOS 会用 Terminal 打开菜单）。
 
 ### 常用参数
 
@@ -163,7 +163,8 @@ wbclean report --format json
 ```
 
 报告里包含环境信息、数据库结构匹配情况、空壳条目数量、会话统计和磁盘占用，
-不含任何会话内容。
+**不含任何会话标题或对话内容**。注意报告里会有你的数据目录路径（含用户名），
+贴之前扫一眼，介意就把那几行删掉。
 
 ---
 
@@ -171,9 +172,9 @@ wbclean report --format json
 
 | 项 | 状态 |
 |---|---|
-| macOS | 支持 |
-| Linux | 支持（依赖 `python3`） |
-| Windows | **暂不支持**（缺 `.command` 启动器，且进程占用检测依赖 `lsof`） |
+| macOS | 支持（主要开发和测试平台） |
+| Linux | 理论可用，未实测（`WorkBuddy` 本身是桌面应用，Linux 上一般没有数据可清） |
+| Windows | **暂不支持**（缺启动器，且进程占用检测依赖 `lsof`） |
 | Python | 3.7 及以上 |
 | 第三方依赖 | 无 |
 
