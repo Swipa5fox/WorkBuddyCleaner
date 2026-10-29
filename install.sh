@@ -74,7 +74,7 @@ case ":$PATH:" in
         echo ""
         echo "  [注意] $PREFIX 不在 PATH 里，装完还要加一行："
         echo ""
-        echo "      echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
+        echo "      echo 'export PATH=\"$PREFIX:\$PATH\"' >> ~/.zshrc"
         echo "      source ~/.zshrc"
         echo ""
         echo "  （bash 用户把 .zshrc 换成 .bashrc）"
