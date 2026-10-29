@@ -1,6 +1,7 @@
-# wbclean
+# WorkBuddy Cleaner
 
-WorkBuddy 工作空间清理工具 —— 清掉侧边栏里那些「本地文件夹已经不存在」的空壳条目。
+> 命令行工具 `wbclean` —— WorkBuddy 清理器。
+> 清掉侧边栏里那些「本地文件夹已经不存在」的空壳条目。
 
 WorkBuddy 的侧边栏「空间」分组只提供逐条右键「从列表中移除」，没有批量入口。
 用得越久，空壳条目越多：它们对应的文件夹早删了，但数据库里的记录还在，
@@ -37,8 +38,8 @@ WorkBuddy 的侧边栏「空间」分组只提供逐条右键「从列表中移�
 需要 **Python 3.7+**（只用标准库，无需 pip install）。
 
 ```bash
-git clone https://github.com/OWNER/wbclean.git   # 换成实际仓库地址
-cd wbclean
+git clone https://github.com/Swipa5fox/WorkBuddycleaner.git
+cd WorkBuddycleaner
 ./install.sh
 ```
 
