@@ -38,8 +38,8 @@ WorkBuddy 的侧边栏「空间」分组只提供逐条右键「从列表中移�
 需要 **Python 3.7+**（只用标准库，无需 pip install）。
 
 ```bash
-git clone https://github.com/Swipa5fox/WorkBuddycleaner.git
-cd WorkBuddycleaner
+git clone https://github.com/Swipa5fox/WorkBuddyCleaner.git
+cd WorkBuddyCleaner
 ./install.sh
 ```
 
