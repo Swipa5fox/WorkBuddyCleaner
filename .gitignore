@@ -11,6 +11,7 @@ __pycache__/
 *.bak.*
 report.json
 wb-report.json
+dist/
 
 # 编辑器
 .idea/
