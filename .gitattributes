@@ -1,0 +1,11 @@
+# 统一换行，避免 Windows 上 clone 之后脚本被 CRLF 污染
+* text=auto
+
+# 带 shebang 的脚本必须是 LF，否则 macOS / Linux 上会 bad interpreter
+bin/wbclean     text eol=lf
+install.sh      text eol=lf
+wbclean.command text eol=lf
+
+# Windows 批处理与 PowerShell 用 CRLF
+*.bat           text eol=crlf
+*.ps1           text eol=crlf

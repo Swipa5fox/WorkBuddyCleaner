@@ -7,6 +7,11 @@ wbclean —— WorkBuddy 数据维护工具
 长期可复用的命令行工具，用来诊断和清理 WorkBuddy 的工作空间列表、
 会话记录和磁盘占用。装一次，以后随时可用。
 
+支持 macOS 与 Windows：
+
+    macOS   数据目录 ~/.workbuddy-ai          工作空间根 ~/WorkBuddy AI
+    Windows 数据目录 %USERPROFILE%\\.workbuddy  工作空间根 %USERPROFILE%\\WorkBuddy
+
 命令
 ----
     wbclean scan        诊断：空壳工作空间、僵尸会话、占用统计
@@ -14,14 +19,17 @@ wbclean —— WorkBuddy 数据维护工具
     wbclean clean       清理空壳工作空间条目
     wbclean backup      备份数据库
     wbclean restore     从备份还原
+    wbclean cache       查看并清理缓存与日志
+    wbclean report      导出诊断报告
+    wbclean menu        交互式菜单
 
 设计原则
 --------
-1. 只读命令（scan / stats / backup）**不需要退出应用**，随时能跑。
+1. 只读命令（scan / stats / backup / report / cache）**不需要退出应用**，随时能跑。
    用的是 SQLite 只读 URI 连接 + 在线备份 API，不会和运行中的应用抢锁。
-2. 写命令（clean / restore）会强制检查应用是否退出，没退就中止。
+2. 写命令（clean / restore / cache --clean）会强制检查应用是否退出，没退就中止。
 3. 所有写操作前自动备份，失败自动回滚。
-4. 绝不删除任何本地文件夹，除非显式加 --history。
+4. 绝不删除任何本地文件夹，除非显式加 --history / --orphans。
 
 典型用法
 --------
@@ -47,15 +55,39 @@ import subprocess
 import sys
 import time
 import unicodedata
+import urllib.parse
 from types import SimpleNamespace
 
-VERSION = "1.2"
+VERSION = "1.3"
 
-APP_HOME = os.path.expanduser("~/.workbuddy-ai")
+IS_WIN = sys.platform.startswith("win")
+IS_MAC = sys.platform == "darwin"
+
+
+def _home():
+    return os.path.expanduser("~")
+
+
+def default_app_home():
+    """WorkBuddy 数据目录的平台默认值（应用里改不了，写死的）。"""
+    if IS_WIN:
+        return os.path.join(_home(), ".workbuddy")
+    return os.path.join(_home(), ".workbuddy-ai")
+
+
+def default_workspace_root():
+    """工作空间的默认根目录。"""
+    if IS_WIN:
+        return os.path.join(_home(), "WorkBuddy")
+    return os.path.join(_home(), "WorkBuddy AI")
+
+
+APP_HOME = default_app_home()
 DB_PATH = os.path.join(APP_HOME, "workbuddy.db")
 DISPLAY_NAMES_PATH = os.path.join(APP_HOME, "workspace-display-names.json")
 PROJECTS_DIR = os.path.join(APP_HOME, "projects")
-BACKUP_ROOT = os.path.expanduser("~/WorkBuddy清理备份")
+WORKSPACE_ROOT = default_workspace_root()
+BACKUP_ROOT = os.path.join(_home(), "WorkBuddy清理备份")
 
 # ANSI
 C_OK = "\033[32m"
@@ -67,6 +99,39 @@ C_0 = "\033[0m"
 
 
 # ============================================================ 基础设施
+
+def init_console():
+    """Windows 控制台：打开 ANSI 转义，并把输出切成 UTF-8。
+
+    Windows 10 的 conhost 默认不解析 \\033[32m 这类序列，会把它们当作
+    可见字符打出来；代码页又多半是 GBK，中文输出变成问号。
+    两件事都要在打印任何东西之前做完，所以 main() 第一句就调它。
+
+    重定向到管道或文件时 GetConsoleMode 会失败，走不到设置分支，
+    这时 reconfigure 仍然把编码压成 UTF-8，日志文件不会乱码。
+    """
+    if not IS_WIN:
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetStdHandle.restype = ctypes.c_void_p
+        for stream_id in (-11, -12):        # STD_OUTPUT_HANDLE / STD_ERROR_HANDLE
+            handle = kernel32.GetStdHandle(stream_id)
+            mode = ctypes.c_uint32()
+            if handle and kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 
 def hr(char="─", width=68):
     print(C_DIM + char * width + C_0)
@@ -100,14 +165,25 @@ def die(msg, code=1):
     sys.exit(code)
 
 
+def ro_uri(path):
+    """构造 SQLite 只读 URI。
+
+    Windows 上路径含反斜杠、盘符冒号和中文，直接拼进 file: URI 会解析失败，
+    必须先转正斜杠再做百分号编码。macOS 的路径走同一条路也没问题。
+    """
+    p = os.path.abspath(path).replace("\\", "/")
+    if not p.startswith("/"):
+        p = "/" + p                    # C:/Users/x → /C:/Users/x
+    return "file://" + urllib.parse.quote(p) + "?mode=ro"
+
+
 def open_ro(db_path=None):
     """只读连接。应用运行中也能安全使用。"""
     path = db_path or DB_PATH
     if not os.path.exists(path):
         die("找不到数据库: %s" % path)
-    uri = "file:%s?mode=ro" % path
     try:
-        conn = sqlite3.connect(uri, uri=True, timeout=10)
+        conn = sqlite3.connect(ro_uri(path), uri=True, timeout=10)
         conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
         return conn
     except sqlite3.Error as e:
@@ -127,11 +203,115 @@ def open_rw(db_path=None):
         die("打开数据库失败: %s" % e)
 
 
+def _win_processes(prefixes):
+    """用 Toolhelp 快照枚举进程，返回 [(pid, exe_name)]。
+
+    不起子进程：一是快，二是部分机器上 tasklist / wmic 会被安全策略拦掉，
+    表现成「检测不到应用在跑」这种最危险的误判。
+    """
+    import ctypes
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_ulong),
+            ("cntUsage", ctypes.c_ulong),
+            ("th32ProcessID", ctypes.c_ulong),
+            ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", ctypes.c_ulong),
+            ("cntThreads", ctypes.c_ulong),
+            ("th32ParentProcessID", ctypes.c_ulong),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_ulong),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
+
+    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == INVALID_HANDLE_VALUE:
+        return []
+
+    found = []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            name = entry.szExeFile or ""
+            low = name.lower()
+            if any(low.startswith(p) for p in prefixes):
+                found.append((entry.th32ProcessID, name))
+            ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(snap))
+    return found
+
+
+def _win_file_locked(path):
+    """以「独占打开」试探文件：开得成说明没有进程持有句柄。
+
+    顶替 macOS 上 lsof 的作用。共享模式传 0 是关键 ——
+    任何别的进程只要开着这个文件（哪怕只读），CreateFile 就会失败。
+    """
+    import ctypes
+
+    GENERIC_READ = 0x80000000
+    OPEN_EXISTING = 3
+    FILE_ATTRIBUTE_NORMAL = 0x80
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    handle = kernel32.CreateFileW(
+        ctypes.c_wchar_p(path),
+        GENERIC_READ,
+        0,                       # dwShareMode = 0
+        None,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        None,
+    )
+    if not handle or handle == INVALID_HANDLE_VALUE:
+        return True
+    kernel32.CloseHandle(ctypes.c_void_p(handle))
+    return False
+
+
 def app_is_running(db_path=None):
     """返回占用原因列表，空列表表示可以安全写入。"""
     path = db_path or DB_PATH
     reasons = []
 
+    if IS_WIN:
+        try:
+            procs = _win_processes(("workbuddy",))
+            if procs:
+                # Electron 一动就是十几个进程，全列出来只会把终端刷屏，
+                # 给个数 + 最小 PID（通常是主进程）够定位了。
+                main_pid = min(pid for pid, _n in procs)
+                reasons.append(
+                    "进程仍在运行（%d 个 WorkBuddy.exe，主进程 PID %d）"
+                    % (len(procs), main_pid))
+        except Exception:
+            pass
+
+        try:
+            for suffix in ("", "-wal"):
+                p = path + suffix
+                if os.path.exists(p) and _win_file_locked(p):
+                    reasons.append("数据库被占用：%s" % os.path.basename(p))
+                    break
+        except Exception:
+            pass
+
+        return reasons
+
+    # ---- macOS / Linux
     try:
         out = subprocess.run(
             ["pgrep", "-f", "WorkBuddy AI.app/Contents/MacOS/WorkBuddy AI"],
@@ -145,7 +325,7 @@ def app_is_running(db_path=None):
 
     try:
         if shutil.which("lsof") is None:
-            # 没有 lsof（如 Windows）：只能靠进程名检测，跳过文件占用检查
+            # 没有 lsof：只能靠进程名检测，跳过文件占用检查
             pass
         else:
             out = subprocess.run(
@@ -174,7 +354,8 @@ def require_app_closed(db_path=None, skip=False):
         print(C_ERR + "  WorkBuddy 还在运行：" + C_0)
         for r in reasons:
             print("    - " + r)
-        die("请先完全退出 WorkBuddy（含菜单栏图标），再执行此命令。")
+        hint = "（含托盘图标）" if IS_WIN else "（含菜单栏图标）"
+        die("请先完全退出 WorkBuddy%s，再执行此命令。" % hint)
     print(C_OK + "  检查通过：应用已退出，数据库未被占用" + C_0)
 
 
@@ -210,10 +391,76 @@ def fmt_time(ms):
         return "—"
 
 
+def norm_path(p):
+    """把同一目录的不同写法归一成同一把钥匙。
+
+    Windows 上 WorkBuddy 会在库里同时写 C:\\Users\\a\\b 和 C:/Users/a/b ——
+    前者来自文件系统，后者来自用户输入或命令行。字符不相等，但指的是
+    同一个文件夹。会话统计和删除如果按字符串精确匹配，会漏掉一半。
+
+    normcase 在 Windows 上顺带统一大小写、统一成反斜杠；
+    在 macOS / Linux 上它什么也不做，所以原有行为不受影响。
+    """
+    if not p:
+        return ""
+    try:
+        p = os.path.expandvars(os.path.expanduser(p))
+        return os.path.normcase(os.path.normpath(p)).rstrip("\\/")
+    except Exception:
+        return p
+
+
+def project_dir_key(workspace_path, is_win=None):
+    """工作空间绝对路径 → projects 目录名（WorkBuddy 自己的规则）。
+
+    macOS   /Users/foo/WorkBuddy AI/x         → Users-foo-WorkBuddy AI-x
+    Windows C:\\Users\\foo\\WorkBuddy\\x        → c-Users-foo-WorkBuddy-x
+            （盘符转小写，冒号不单独占位，C:\\ 整体只产生一个 -）
+
+    Windows 上不能沿用 macOS 那套「把冒号和分隔符各换一个 -」：
+    C:\\ 会被算成 C--，跟磁盘上的真实目录名对不上，一条都匹配不到。
+
+    is_win 显式传入时按指定平台算，方便在任一平台上跑跨平台单测。
+    """
+    p = (workspace_path or "").strip()
+    if not p:
+        return ""
+    if is_win is None:
+        is_win = IS_WIN
+    if is_win:
+        p = p.rstrip("\\/")
+        m = re.match(r"^([A-Za-z]):[\\/]?", p)
+        if m:
+            drive = m.group(1).lower()
+            rest = re.sub(r"[\\/]+", "-", p[m.end():])
+            return drive + ("-" + rest if rest else "")
+        return re.sub(r"[\\/]+", "-", p)
+    return p.replace("/", "-").lstrip("-")
+
+
 def project_dir_for(workspace_path):
-    """工作空间绝对路径 → projects 目录名。规则：/ 换成 -，去掉开头的 -。"""
-    key = workspace_path.replace("/", "-").lstrip("-")
-    return os.path.join(PROJECTS_DIR, key)
+    """工作空间绝对路径 → projects 下的历史目录路径。"""
+    return os.path.join(PROJECTS_DIR, project_dir_key(workspace_path))
+
+
+def path_from_project_key(key, is_win=None):
+    """projects 目录名反解回原路径 —— 尽力而为，不能当删除依据。
+
+    Windows 上可以按「盘符 + 剩余全部换回反斜杠」反解，但原路径里的 -
+    和分隔符转出来的 - 长得一模一样，带横线的目录名会解错。
+    所以这个结果只用来判断「目标还在不在」，真删之前必须再过一遍
+    sessions 表里记着的真实路径。
+
+    macOS 上目录名丢掉了开头的 /，也无法区分，直接放弃反解。
+    """
+    if is_win is None:
+        is_win = IS_WIN
+    if not is_win:
+        return None
+    m = re.match(r"^([a-z])-(.+)$", key)
+    if not m:
+        return None
+    return "%s:\\%s" % (m.group(1).upper(), m.group(2).replace("-", "\\"))
 
 
 def safe_under(path, parent):
@@ -222,6 +469,24 @@ def safe_under(path, parent):
         return os.path.realpath(path).startswith(os.path.realpath(parent) + os.sep)
     except Exception:
         return False
+
+
+def index_sessions(conn):
+    """按归一化后的 cwd 建会话索引。
+
+    一次性读全表再在内存里归组，比逐个工作空间跑 COUNT(*) 快得多，
+    也顺便解决了上面说的路径双轨问题。
+    """
+    idx = {}
+    for sid, cwd, deleted_at in conn.execute(
+            "SELECT id, cwd, deleted_at FROM sessions"):
+        rec = idx.setdefault(norm_path(cwd),
+                             {"total": 0, "soft": 0, "soft_ids": []})
+        rec["total"] += 1
+        if deleted_at is not None:
+            rec["soft"] += 1
+            rec["soft_ids"].append(sid)
+    return idx
 
 
 def do_clean(conn, dead, dry_run=False):
@@ -248,11 +513,20 @@ def do_clean(conn, dead, dry_run=False):
             "DELETE FROM workspaces WHERE path = ?", (item["path"],))
         deleted_ws += cur.rowcount
 
-        cur = conn.execute(
-            "DELETE FROM sessions WHERE cwd = ? AND deleted_at IS NOT NULL",
-            (item["path"],),
-        )
-        deleted_sessions += cur.rowcount
+        soft_ids = item.get("soft_session_ids")
+        if soft_ids is None:
+            # 没带索引（外部直接构造的 item）：退回按 cwd 精确匹配
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE cwd = ? AND deleted_at IS NOT NULL",
+                (item["path"],),
+            )
+            deleted_sessions += cur.rowcount
+        elif soft_ids:
+            # 按主键删：两种斜杠写法已经在建索引时归一，不会漏
+            conn.executemany(
+                "DELETE FROM sessions WHERE id = ?",
+                [(sid,) for sid in soft_ids])
+            deleted_sessions += len(soft_ids)
 
         if item["sessions_alive"]:
             skipped_alive.append(item)
@@ -294,8 +568,7 @@ def check_schema(conn):
     """校验依赖的表和字段是否都在。
 
     缺了就明确报错并退出，**绝不带着不确定的假设去改用户的数据库**。
-    WorkBuddy 的 schema 有版本化迁移（当前已有 18 个迁移文件），
-    新版改了表名或字段的可能性不低。
+    WorkBuddy 的 schema 有版本化迁移，新版改表名或字段的可能性不低。
     """
     missing = schema_missing(conn)
     if missing:
@@ -319,22 +592,20 @@ def collect(conn, verify=True):
         "SELECT path, last_opened_at FROM workspaces ORDER BY last_opened_at DESC"
     ).fetchall()
 
+    idx = index_sessions(conn)
+
     dead, alive = [], []
     for path, last_opened in rows:
-        total = conn.execute(
-            "SELECT COUNT(*) FROM sessions WHERE cwd = ?", (path,)
-        ).fetchone()[0]
-        soft = conn.execute(
-            "SELECT COUNT(*) FROM sessions WHERE cwd = ? AND deleted_at IS NOT NULL",
-            (path,),
-        ).fetchone()[0]
+        rec = idx.get(norm_path(path)) or {"total": 0, "soft": 0, "soft_ids": []}
+        name = os.path.basename(path.rstrip("\\/")) or path
         item = {
             "path": path,
-            "name": os.path.basename(path) or path,
+            "name": name,
             "last_opened": last_opened,
-            "sessions_total": total,
-            "sessions_soft_deleted": soft,
-            "sessions_alive": total - soft,
+            "sessions_total": rec["total"],
+            "sessions_soft_deleted": rec["soft"],
+            "sessions_alive": rec["total"] - rec["soft"],
+            "soft_session_ids": rec["soft_ids"],
             "exists": os.path.isdir(path),
         }
         (alive if item["exists"] else dead).append(item)
@@ -353,12 +624,59 @@ def collect(conn, verify=True):
     }
 
 
+def find_orphan_projects(conn):
+    """找出 projects 下不属于任何现役工作空间的历史目录。
+
+    这是 Windows 上磁盘占用的真正大头：任务删了、工作空间记录也没了，
+    但 projects 下那份会话历史原样躺着，几百 MB 很常见。
+
+    判定链（每一步都要过）：
+      1. 目录名不在 workspaces 的 key 集合里 —— 不是现役工作空间；
+      2. 用 sessions.cwd 反查它的真实路径（查不到才退回目录名反解）；
+      3. 真实路径仍然存在 —— 说明只是换了入口在用，不动。
+    """
+    if not os.path.isdir(PROJECTS_DIR):
+        return []
+
+    ws_keys = set(
+        project_dir_key(p) for p, in conn.execute("SELECT path FROM workspaces"))
+
+    # 会话里出现过的真实路径，按 key 归组，作为反解的第一手依据
+    key_to_path = {}
+    for cwd, in conn.execute("SELECT DISTINCT cwd FROM sessions"):
+        if not cwd:
+            continue
+        k = project_dir_key(cwd)
+        if k:
+            key_to_path.setdefault(k, cwd)
+
+    out = []
+    for name in sorted(os.listdir(PROJECTS_DIR)):
+        full = os.path.join(PROJECTS_DIR, name)
+        if os.path.islink(full) or not os.path.isdir(full):
+            continue
+        if name in ws_keys:
+            continue
+        real = key_to_path.get(name) or path_from_project_key(name)
+        exists = bool(real) and os.path.isdir(real)
+        out.append({
+            "name": name,
+            "dir": full,
+            "size": dir_size(full),
+            "source_path": real,
+            "source_exists": exists,
+            "deletable": not exists,
+        })
+    return out
+
+
 # ============================================================ 命令：scan
 
 def cmd_scan(args):
     conn = open_ro(args.db)
     try:
         data = collect(conn)
+        orphans = find_orphan_projects(conn)
     finally:
         conn.close()
 
@@ -394,6 +712,25 @@ def cmd_scan(args):
         for item in alive:
             print("    · %-28s %s" % (item["name"], C_DIM + item["path"] + C_0))
 
+    # ---- 孤儿历史目录
+    dead_orphans = [o for o in orphans if o["deletable"]]
+    kept = [o for o in orphans if not o["deletable"]]
+    if dead_orphans:
+        total = sum(o["size"] for o in dead_orphans)
+        print("\n  " + C_WARN
+              + "孤儿历史目录 %d 个，共 %s" % (len(dead_orphans), human_size(total))
+              + C_0)
+        print("  " + C_DIM + "（projects 下的会话历史，对应路径已不存在）" + C_0)
+        for o in sorted(dead_orphans, key=lambda x: -x["size"])[:10]:
+            print("    · %-46s %s" % (o["name"][:46], human_size(o["size"])))
+        if len(dead_orphans) > 10:
+            print("    · ... 另外 %d 个" % (len(dead_orphans) - 10))
+        print("\n  清理方法：" + C_B + "wbclean clean --orphans" + C_0
+              + "（需先退出 WorkBuddy）")
+    if kept:
+        print("\n  " + C_DIM
+              + "另有 %d 个历史目录对应路径仍然存在，保留不动" % len(kept) + C_0)
+
     print()
 
 
@@ -403,6 +740,7 @@ def cmd_stats(args):
     conn = open_ro(args.db)
     try:
         data = collect(conn)
+        orphans = find_orphan_projects(conn)
     finally:
         conn.close()
 
@@ -420,7 +758,7 @@ def cmd_stats(args):
     print("\n  目录")
     targets = [
         ("会话历史 projects", PROJECTS_DIR),
-        ("工作空间 ~/WorkBuddy AI", os.path.expanduser("~/WorkBuddy AI")),
+        ("工作空间 %s" % os.path.basename(WORKSPACE_ROOT), WORKSPACE_ROOT),
         ("产物索引 artifact-index", os.path.join(APP_HOME, "artifact-index")),
         ("文件历史 file-history", os.path.join(APP_HOME, "file-history")),
         ("变更记录 changes-detail", os.path.join(APP_HOME, "changes-detail")),
@@ -428,13 +766,18 @@ def cmd_stats(args):
         ("日志 logs", os.path.join(APP_HOME, "logs")),
         ("缓存 cache", os.path.join(APP_HOME, "cache")),
     ]
+    if IS_WIN:
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            targets.append(("Electron 日志 LocalAppData",
+                            os.path.join(local, "WorkBuddy", "logs")))
     for label, path in targets:
         if os.path.isdir(path):
             print("    %-32s %s" % (label, human_size(dir_size(path))))
         else:
             print("    %-32s %s" % (label, C_DIM + "（不存在）" + C_0))
 
-    # 空壳项目目录
+    # 空壳工作空间对应的历史文件夹
     dead = data["dead"]
     stale = []
     for item in dead:
@@ -446,6 +789,14 @@ def cmd_stats(args):
         print("\n  " + C_WARN + "空壳项目的历史文件夹：%d 个，共 %s"
               % (len(stale), human_size(total)) + C_0)
         print("  清理方法：" + C_B + "wbclean clean --history" + C_0)
+
+    # 孤儿历史目录
+    dead_orphans = [o for o in orphans if o["deletable"]]
+    if dead_orphans:
+        total = sum(o["size"] for o in dead_orphans)
+        print("\n  " + C_WARN + "孤儿历史目录：%d 个，共 %s"
+              % (len(dead_orphans), human_size(total)) + C_0)
+        print("  清理方法：" + C_B + "wbclean clean --orphans" + C_0)
 
     print()
 
@@ -478,6 +829,7 @@ def make_backup(tag="auto", db_path=None):
             "tag": tag,
             "db_size": os.path.getsize(dest_db),
             "version": VERSION,
+            "platform": sys.platform,
         }, f, ensure_ascii=False, indent=2)
 
     return dest_dir, dest_db
@@ -618,14 +970,21 @@ def cmd_clean(args):
     conn = open_ro(args.db)
     try:
         data = collect(conn)
+        orphans = find_orphan_projects(conn) if args.orphans else []
     finally:
         conn.close()
 
     dead, alive = data["dead"], data["alive"]
+    dead_orphans = [o for o in orphans if o["deletable"]]
     print("  工作空间 %d 条：正常 %d，空壳 %d"
           % (len(dead) + len(alive), len(alive), len(dead)))
+    if args.orphans:
+        print("  孤儿历史目录 %d 个，共 %s"
+              % (len(dead_orphans),
+                 human_size(sum(o["size"] for o in dead_orphans))))
 
-    if not dead and not (args.sessions and data["total_soft_sessions"]):
+    if not dead and not (args.sessions and data["total_soft_sessions"]) \
+            and not dead_orphans:
         print("\n  " + C_OK + "没有需要清理的内容。" + C_0 + "\n")
         return
 
@@ -669,6 +1028,17 @@ def cmd_clean(args):
         else:
             print("    （没有匹配到）")
 
+    orphan_targets = []
+    if args.orphans:
+        print("\n  " + C_WARN + "孤儿历史目录：" + C_0)
+        for o in sorted(dead_orphans, key=lambda x: -x["size"]):
+            orphan_targets.append((o["dir"], o["size"], o["name"]))
+            print("    · %-46s %s" % (o["name"][:46], human_size(o["size"])))
+        if orphan_targets:
+            print("    合计 %s" % human_size(sum(s for _d, s, _n in orphan_targets)))
+        else:
+            print("    （没有匹配到）")
+
     # ---- 预览到此结束
     if args.dry_run:
         print("\n" + C_WARN + "[预览模式] 未写入任何内容。" + C_0 + "\n")
@@ -680,7 +1050,9 @@ def cmd_clean(args):
         hr("═")
         print(C_B + "  请确认" + C_0)
         hr("═")
-        print("  · 本地文件夹不会被删除" + ("（--history 指定的除外）" if args.history else ""))
+        print("  · 本地文件夹不会被删除"
+              + ("（--history / --orphans 指定的除外）"
+                 if (args.history or args.orphans) else ""))
         print("  · 数据库会自动备份到 %s" % BACKUP_ROOT)
         print("  · 操作后需重启 WorkBuddy 生效")
         print()
@@ -742,6 +1114,25 @@ def cmd_clean(args):
         if freed:
             print(C_OK + "  释放 %s" % human_size(freed) + C_0)
 
+    # 孤儿历史目录
+    if orphan_targets:
+        freed = 0
+        print()
+        print("  孤儿历史目录：")
+        for cand, sz, name in orphan_targets:
+            # 二次护栏：必须在 projects 目录内
+            if not safe_under(cand, PROJECTS_DIR):
+                print("    " + C_WARN + "跳过（不在 projects 内）：%s" % cand + C_0)
+                continue
+            try:
+                shutil.rmtree(cand)
+                freed += sz
+                print("    - %s (%s)" % (name[:46], human_size(sz)))
+            except Exception as e:
+                print("    " + C_WARN + "跳过 %s: %s" % (cand, e) + C_0)
+        if freed:
+            print(C_OK + "  释放 %s" % human_size(freed) + C_0)
+
     if skipped_alive:
         print("\n  " + C_WARN + "保留的存活会话：" + C_0)
         for item in skipped_alive:
@@ -781,7 +1172,10 @@ def prune_display_names(dead_paths):
     except Exception:
         return 0
     ws = data.get("workspaces") or {}
-    doomed = [k for k in ws.keys() if k in dead_paths]
+    # 键可能是另一种斜杠写法，按归一化结果比对
+    doomed_norm = {norm_path(p) for p in dead_paths}
+    doomed = [k for k in ws.keys()
+              if k in dead_paths or norm_path(k) in doomed_norm]
     if not doomed:
         return 0
     for k in doomed:
@@ -796,16 +1190,23 @@ def prune_display_names(dead_paths):
 
 # ============================================================ 命令：report
 
-REPORT_DIRS = [
-    ("projects", PROJECTS_DIR),
-    ("workspace_root", os.path.expanduser("~/WorkBuddy AI")),
-    ("artifact_index", os.path.join(APP_HOME, "artifact-index")),
-    ("file_history", os.path.join(APP_HOME, "file-history")),
-    ("changes_detail", os.path.join(APP_HOME, "changes-detail")),
-    ("blobs", os.path.join(APP_HOME, "blobs")),
-    ("logs", os.path.join(APP_HOME, "logs")),
-    ("cache", os.path.join(APP_HOME, "cache")),
-]
+def report_dirs():
+    dirs = [
+        ("projects", PROJECTS_DIR),
+        ("workspace_root", WORKSPACE_ROOT),
+        ("artifact_index", os.path.join(APP_HOME, "artifact-index")),
+        ("file_history", os.path.join(APP_HOME, "file-history")),
+        ("changes_detail", os.path.join(APP_HOME, "changes-detail")),
+        ("blobs", os.path.join(APP_HOME, "blobs")),
+        ("logs", os.path.join(APP_HOME, "logs")),
+        ("cache", os.path.join(APP_HOME, "cache")),
+    ]
+    if IS_WIN:
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            dirs.append(("electron_logs",
+                         os.path.join(local, "WorkBuddy", "logs")))
+    return dirs
 
 
 def build_report(args):
@@ -822,6 +1223,7 @@ def build_report(args):
             "system": platform.system(),
             "release": platform.release(),
             "python": platform.python_version(),
+            "is_windows": IS_WIN,
             "has_lsof": shutil.which("lsof") is not None,
         },
         "app": {
@@ -833,6 +1235,7 @@ def build_report(args):
         },
         "workspaces": {"total": 0, "alive": 0, "dead": 0},
         "sessions": {"total": 0, "soft_deleted": 0},
+        "orphans": {"count": 0, "bytes": 0},
         "disk": {},
         "suggestions": [],
     }
@@ -843,8 +1246,7 @@ def build_report(args):
         return rep
 
     try:
-        conn = sqlite3.connect(
-            "file:%s?mode=ro" % db_path, uri=True, timeout=10)
+        conn = sqlite3.connect(ro_uri(db_path), uri=True, timeout=10)
         conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
     except Exception as e:
         rep["suggestions"].append("数据库打不开：%s" % e)
@@ -872,10 +1274,22 @@ def build_report(args):
             "total": data["total_sessions"],
             "soft_deleted": data["total_soft_sessions"],
         }
+
+        orphans = [o for o in find_orphan_projects(conn) if o["deletable"]]
+        rep["orphans"] = {
+            "count": len(orphans),
+            "bytes": sum(o["size"] for o in orphans),
+        }
+
         if dead:
             rep["suggestions"].append(
                 "有 %d 条空壳工作空间条目（本地文件夹已不存在），"
                 "运行 `wbclean clean` 可清理" % len(dead))
+        if orphans:
+            rep["suggestions"].append(
+                "有 %d 个孤儿历史目录，占 %s，"
+                "运行 `wbclean clean --orphans` 可清理"
+                % (len(orphans), human_size(rep["orphans"]["bytes"])))
         if data["total_soft_sessions"]:
             rep["suggestions"].append(
                 "有 %d 条已软删除的会话记录，"
@@ -884,7 +1298,7 @@ def build_report(args):
     finally:
         conn.close()
 
-    for label, path in REPORT_DIRS:
+    for label, path in report_dirs():
         if os.path.isdir(path):
             rep["disk"][label] = dir_size(path)
 
@@ -923,6 +1337,11 @@ def format_report_text(rep):
     lines.append("[会话]")
     ss = rep["sessions"]
     lines.append("  共 %d 条：已软删除 %d" % (ss["total"], ss["soft_deleted"]))
+    lines.append("")
+    lines.append("[孤儿历史目录]")
+    orp = rep.get("orphans") or {}
+    lines.append("  可清理 %d 个，共 %s"
+                 % (orp.get("count", 0), human_size(orp.get("bytes", 0))))
     if rep["disk"]:
         lines.append("")
         lines.append("[磁盘占用]")
@@ -959,7 +1378,7 @@ def cmd_report(args):
 def cache_targets():
     """每次调用重新构造 —— --app-home 会改 APP_HOME，模块级常量会失效。"""
     home = APP_HOME
-    return [
+    targets = [
         {
             "name": "logs", "label": "应用运行日志",
             "path": os.path.join(home, "logs"), "level": "safe",
@@ -991,6 +1410,21 @@ def cache_targets():
             "note": "删除后产物列表需要重建",
         },
     ]
+
+    # Windows 上 Electron 主进程日志另存一份在 LocalAppData，
+    # 跟 ~/.workbuddy/logs 不是同一个目录，两边都清才是真干净。
+    if IS_WIN:
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            ext_root = os.path.join(local, "WorkBuddy")
+            targets.append({
+                "name": "localappdata/logs", "label": "Electron 主进程日志",
+                "path": os.path.join(ext_root, "logs"), "level": "safe",
+                "note": "启动器与渲染进程日志，可安全删除",
+                "root": ext_root,
+            })
+
+    return targets
 
 
 # 护栏：无论什么参数都不会被删除。仅用于展示，也提醒读代码的人别往白名单里乱加。
@@ -1175,8 +1609,9 @@ def cmd_cache(args):
     print("\n[2/2] 清理 ...")
     freed_total = 0
     for r in selected:
-        # 二次护栏：目标必须在数据目录之内
-        if not safe_under(r["path"], APP_HOME):
+        # 二次护栏：目标必须落在它自己声明的根目录内
+        root = r.get("root", APP_HOME)
+        if not safe_under(r["path"], root):
             print("    " + C_WARN + "跳过（不在数据目录内）：%s" % r["path"] + C_0)
             continue
         freed = purge_dir_contents(
@@ -1200,12 +1635,13 @@ MENU_ITEMS = [
     ("1", "诊断当前状态", "随时可用", C_OK, "，不用退应用"),
     ("2", "清理空壳条目", "需先退出", C_WARN, " WorkBuddy"),
     ("3", "清理并删历史文件", "需先退出", C_WARN, " WorkBuddy，多省几 MB"),
-    ("4", "安全清理缓存", "需先退出", C_WARN, " WorkBuddy，日志与缓存"),
-    ("5", "深度清理缓存", "需先退出", C_WARN, " WorkBuddy，会丢回滚"),
-    ("6", "备份数据库", "随时可用", C_OK, "，随时能跑"),
-    ("7", "查看磁盘占用", "随时可用", C_OK, "，随时能跑"),
-    ("8", "从备份还原", "需先退出", C_WARN, " WorkBuddy"),
-    ("9", "导出诊断报告", "随时可用", C_OK, "，反馈问题用"),
+    ("4", "清理孤儿历史目录", "需先退出", C_WARN, " WorkBuddy，清 projects 残留"),
+    ("5", "安全清理缓存", "需先退出", C_WARN, " WorkBuddy，日志与缓存"),
+    ("6", "深度清理缓存", "需先退出", C_WARN, " WorkBuddy，会丢回滚"),
+    ("7", "备份数据库", "随时可用", C_OK, "，随时能跑"),
+    ("8", "查看磁盘占用", "随时可用", C_OK, "，随时能跑"),
+    ("9", "从备份还原", "需先退出", C_WARN, " WorkBuddy"),
+    ("10", "导出诊断报告", "随时可用", C_OK, "，反馈问题用"),
 ]
 
 MENU_RULE = 62
@@ -1225,12 +1661,12 @@ def render_menu():
 
     for num, name, label, color, extra in MENU_ITEMS:
         desc = color + label + C_0 + C_DIM + extra + C_0
-        print("%s%s  %s  %s" % (MENU_INDENT, C_B + num + C_0,
+        print("%s%s  %s  %s" % (MENU_INDENT, C_B + pad(num, 2) + C_0,
                                 pad(name, name_w), desc))
 
     print()
     print(MENU_INDENT + C_DIM + "-" * MENU_RULE + C_0)
-    print("%s%s  %s" % (MENU_INDENT, C_B + "0" + C_0, "退出"))
+    print("%s%s  %s" % (MENU_INDENT, C_B + "0 " + C_0, "退出"))
     print()
 
 
@@ -1239,25 +1675,30 @@ def cmd_menu(args):
     handlers = {
         "1": (cmd_scan, lambda: SimpleNamespace(db=args.db)),
         "2": (cmd_clean, lambda: SimpleNamespace(
-            db=args.db, dry_run=False, yes=False, history=False, sessions=False)),
+            db=args.db, dry_run=False, yes=False, history=False,
+            sessions=False, orphans=False)),
         "3": (cmd_clean, lambda: SimpleNamespace(
-            db=args.db, dry_run=False, yes=False, history=True, sessions=False)),
-        "4": (cmd_cache, lambda: SimpleNamespace(
+            db=args.db, dry_run=False, yes=False, history=True,
+            sessions=False, orphans=False)),
+        "4": (cmd_clean, lambda: SimpleNamespace(
+            db=args.db, dry_run=False, yes=False, history=False,
+            sessions=False, orphans=True)),
+        "5": (cmd_cache, lambda: SimpleNamespace(
             db=args.db, clean=True, deep=False, keep_days=0,
             dry_run=False, yes=False)),
-        "5": (cmd_cache, lambda: SimpleNamespace(
+        "6": (cmd_cache, lambda: SimpleNamespace(
             db=args.db, clean=True, deep=True, keep_days=0,
             dry_run=False, yes=False)),
-        "6": (cmd_backup, lambda: SimpleNamespace(db=args.db)),
-        "7": (cmd_stats, lambda: SimpleNamespace(db=args.db)),
-        "9": (cmd_report, lambda: SimpleNamespace(db=args.db, format="text",
+        "7": (cmd_backup, lambda: SimpleNamespace(db=args.db)),
+        "8": (cmd_stats, lambda: SimpleNamespace(db=args.db)),
+        "10": (cmd_report, lambda: SimpleNamespace(db=args.db, format="text",
                                                    output=None)),
     }
 
     while True:
         render_menu()
         try:
-            choice = input(MENU_INDENT + C_DIM + "请选择 [0-9]: " + C_0).strip()
+            choice = input(MENU_INDENT + C_DIM + "请选择（0 退出）: " + C_0).strip()
         except (KeyboardInterrupt, EOFError):
             print()
             return
@@ -1265,7 +1706,7 @@ def cmd_menu(args):
         if choice in ("0", "q", ""):
             return
 
-        if choice == "8":
+        if choice == "9":
             print("\033[2J\033[H", end="")
             cmd_restore(SimpleNamespace(
                 db=args.db, name=None, yes=False,
@@ -1303,7 +1744,7 @@ def build_parser():
     p = argparse.ArgumentParser(
         prog="wbclean",
         description="WorkBuddy 数据维护工具：诊断、清理、备份、还原",
-        epilog="只读命令（scan/stats/backup）不需要退出应用；"
+        epilog="只读命令（scan/stats/backup/report）不需要退出应用；"
                "写命令（clean/restore）会强制检查。",
     )
     p.add_argument("--version", action="version", version="wbclean " + VERSION)
@@ -1312,8 +1753,8 @@ def build_parser():
                    help=argparse.SUPPRESS)
     p.add_argument("--app-home", default=os.environ.get("WBCLEAN_APP_HOME"),
                    metavar="DIR",
-                   help="WorkBuddy 数据目录（默认 ~/.workbuddy-ai，"
-                        "也可用环境变量 WBCLEAN_APP_HOME）")
+                   help="WorkBuddy 数据目录（默认 %s，"
+                        "也可用环境变量 WBCLEAN_APP_HOME）" % default_app_home())
     sub = p.add_subparsers(dest="command", metavar="<命令>")
 
     sp = sub.add_parser("scan", help="诊断空壳工作空间与僵尸会话（只读）")
@@ -1327,6 +1768,8 @@ def build_parser():
     sp.add_argument("--yes", action="store_true", help="跳过交互确认")
     sp.add_argument("--history", action="store_true",
                     help="同时删除空壳项目的会话历史文件夹")
+    sp.add_argument("--orphans", action="store_true",
+                    help="同时删除不属于任何工作空间的孤儿历史目录")
     sp.add_argument("--sessions", action="store_true",
                     help="额外清理所有已软删除的会话记录（含正常项目的）")
     sp.set_defaults(func=cmd_clean)
@@ -1363,6 +1806,8 @@ def build_parser():
 
 
 def main():
+    init_console()
+
     parser = build_parser()
     args = parser.parse_args()
     if not getattr(args, "command", None):
@@ -1370,7 +1815,7 @@ def main():
         print()
         return 0
 
-    # 数据目录可覆盖：命令行参数优先，其次环境变量，最后默认 ~/.workbuddy-ai
+    # 数据目录可覆盖：命令行参数优先，其次环境变量，最后按平台取默认值
     app_home = getattr(args, "app_home", None)
     if app_home:
         global APP_HOME, DB_PATH, DISPLAY_NAMES_PATH, PROJECTS_DIR

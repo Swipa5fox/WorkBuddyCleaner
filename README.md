@@ -2,7 +2,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.7%2B-blue.svg)
-![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 
 > **WorkBuddy 清理器** —— 清掉侧边栏里那些「本地文件夹已经不存在」的空壳工作空间条目。
@@ -13,6 +13,9 @@ WorkBuddy 的侧边栏「空间」分组只提供逐条右键「从列表中移�
 
 本工具把这些空壳条目批量清掉，顺带提供诊断、备份、还原和磁盘占用统计。
 
+macOS 与 Windows 用**同一份代码**，差异只在数据目录、进程检测和路径规则上，
+详见 [Windows 说明](#windows-说明)。
+
 ---
 
 ## 目录
@@ -21,6 +24,7 @@ WorkBuddy 的侧边栏「空间」分组只提供逐条右键「从列表中移�
 - [免责声明](#免责声明)
 - [安装](#安装)
 - [用法](#用法)
+- [Windows 说明](#windows-说明)
 - [工作原理](#工作原理)
 - [安全设计](#安全设计)
 - [兼容性](#兼容性)
@@ -41,20 +45,21 @@ WorkBuddy 的侧边栏「空间」分组只提供逐条右键「从列表中移�
                          WorkBuddy 数据维护
    ==============================================================
 
-   1  诊断当前状态      随时可用，不用退应用
-   2  清理空壳条目      需先退出 WorkBuddy
-   3  清理并删历史文件  需先退出 WorkBuddy，多省几 MB
-   4  安全清理缓存      需先退出 WorkBuddy，日志与缓存
-   5  深度清理缓存      需先退出 WorkBuddy，会丢回滚
-   6  备份数据库        随时可用，随时能跑
-   7  查看磁盘占用      随时可用，随时能跑
-   8  从备份还原        需先退出 WorkBuddy
-   9  导出诊断报告      随时可用，反馈问题用
+   1   诊断当前状态      随时可用，不用退应用
+   2   清理空壳条目      需先退出 WorkBuddy
+   3   清理并删历史文件  需先退出 WorkBuddy，多省几 MB
+   4   清理孤儿历史目录  需先退出 WorkBuddy，清 projects 残留
+   5   安全清理缓存      需先退出 WorkBuddy，日志与缓存
+   6   深度清理缓存      需先退出 WorkBuddy，会丢回滚
+   7   备份数据库        随时可用，随时能跑
+   8   查看磁盘占用      随时可用，随时能跑
+   9   从备份还原        需先退出 WorkBuddy
+   10  导出诊断报告      随时可用，反馈问题用
 
    --------------------------------------------------------------
-   0  退出
+   0   退出
 
-   请选择 [0-9]:
+   请选择（0 退出）:
 ```
 
 **它做两件事**：
@@ -116,6 +121,8 @@ WorkBuddy 的侧边栏「空间」分组只提供逐条右键「从列表中移�
 
 **环境要求**：Python 3.7 及以上。只用标准库，无需 `pip install`。
 
+### macOS / Linux
+
 ```bash
 git clone https://github.com/Swipa5fox/WorkBuddyCleaner.git
 cd WorkBuddyCleaner
@@ -141,6 +148,44 @@ wbclean scan
 **卸载**：删掉 `~/.local/bin/wbclean` 即可。工具不在系统任何其他位置留下文件
 （备份目录 `~/WorkBuddy清理备份/` 需手动删除）。
 
+### Windows
+
+先装 Python（[python.org](https://www.python.org/downloads/windows/)，安装时勾上
+**Add python.exe to PATH**）。然后用 PowerShell 跑安装脚本：
+
+```powershell
+git clone https://github.com/Swipa5fox/WorkBuddyCleaner.git
+cd WorkBuddyCleaner
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+默认装到 `%LOCALAPPDATA%\wbclean`，生成 `wbclean.cmd` 包装器。装到别处：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Prefix D:\tools\wbclean
+```
+
+包装器生成后，按脚本提示把该目录加进 PATH（脚本只打印命令，不擅自改系统设置）：
+
+```powershell
+setx PATH "$env:PATH;%LOCALAPPDATA%\wbclean"
+```
+
+然后**重开一个终端窗口**，验证：
+
+```powershell
+wbclean --version
+wbclean scan
+```
+
+不想装也行 —— 仓库根目录的 `wbclean.bat` 双击就能开菜单：
+
+```
+wbclean.bat          →  交互式菜单
+```
+
+**卸载**：删掉 `%LOCALAPPDATA%\wbclean` 目录，再从 PATH 里去掉那一项。
+
 ---
 
 ## 用法
@@ -155,6 +200,7 @@ wbclean scan
 | `wbclean report` | 生成诊断报告 | 否 |
 | `wbclean backup` | 备份数据库 | 否 |
 | `wbclean clean` | 清理空壳条目 | **是** |
+| `wbclean clean --orphans` | 清理不属于任何工作空间的孤儿历史目录 | **是** |
 | `wbclean cache --clean` | 清理缓存与日志 | **是** |
 | `wbclean restore` | 从备份还原 | **是** |
 | `wbclean menu` | 交互式菜单 | 视所选命令 |
@@ -168,6 +214,7 @@ wbclean menu
 ```
 
 macOS 上也可以双击仓库根目录的 `wbclean.command`。
+Windows 上双击 `wbclean.bat`（或 `%LOCALAPPDATA%\wbclean\wbclean.cmd` 的快捷方式）。
 
 ### 常用参数
 
@@ -175,6 +222,7 @@ macOS 上也可以双击仓库根目录的 `wbclean.command`。
 # 清理空壳
 wbclean clean --dry-run          # 只预览要删什么，不写任何东西
 wbclean clean --history          # 同时删除空壳项目的会话历史文件夹
+wbclean clean --orphans          # 同时删除孤儿历史目录（见下节）
 wbclean clean --sessions         # 额外清理全部已软删除的会话记录
 wbclean clean --yes              # 跳过交互确认（谨慎）
 
@@ -207,6 +255,12 @@ wbclean restore 20261029-143022  # 还原到指定备份
 | `cache/` | 产品配置与会话快照 | 应用会重新拉取 |
 | `app/cache/` | Electron 渲染进程缓存 | 可安全删除 |
 
+Windows 上额外多一项（Electron 主进程日志另存一份，不在数据目录里）：
+
+| 目录 | 内容 | 说明 |
+| :--- | :--- | :--- |
+| `%LOCALAPPDATA%\WorkBuddy\logs\` | 启动器与渲染进程日志 | 可安全删除 |
+
 **深度清理**（`--clean --deep`）—— 会丢失部分历史能力：
 
 | 目录 | 内容 | 代价 |
@@ -234,13 +288,97 @@ wbclean cache --clean --keep-days 7    # 最近一周的日志留着，方便排
 
 ### 自定义数据目录
 
-WorkBuddy 本身没有提供修改数据目录的设置（固定在 `~/.workbuddy-ai`）。
+WorkBuddy 本身没有提供修改数据目录的设置（macOS 固定在 `~/.workbuddy-ai`，
+Windows 固定在 `%USERPROFILE%\.workbuddy`）。
 如果你把数据放在了别处，可以用参数或环境变量覆盖：
 
 ```bash
 wbclean --app-home /path/to/.workbuddy-ai scan
 WBCLEAN_APP_HOME=/path/to/.workbuddy-ai wbclean scan
 ```
+
+```powershell
+wbclean --app-home D:\backup\.workbuddy scan
+$env:WBCLEAN_APP_HOME = "D:\backup\.workbuddy"; wbclean scan
+```
+
+---
+
+## Windows 说明
+
+同一份代码，Windows 上有三处必须区别对待的地方。这一节把它们讲清楚，
+你遇到「跟 macOS 不一样」的现象时先看这里。
+
+### 数据目录与工作空间根
+
+| 项 | macOS | Windows |
+| :--- | :--- | :--- |
+| 数据目录 | `~/.workbuddy-ai` | `%USERPROFILE%\.workbuddy` |
+| 数据库 | `~/.workbuddy-ai/workbuddy.db` | `%USERPROFILE%\.workbuddy\workbuddy.db` |
+| 工作空间根 | `~/WorkBuddy AI` | `%USERPROFILE%\WorkBuddy` |
+| 会话历史 | `~/.workbuddy-ai/projects/` | 同左 |
+| 备份目录 | `~/WorkBuddy清理备份/` | 同左 |
+
+数据库表结构两边一致（`workspaces` / `sessions`），所以扫描和清理逻辑通用。
+
+### 一个目录，两种写法
+
+这是 Windows 上最容易踩的坑。WorkBuddy 会把**同一个文件夹**在库里存成两种形式：
+
+```
+C:\Users\Administrator\WorkBuddy\2026-08-06-14-46-01     ← 文件系统给的
+C:/Users/Administrator/WorkBuddy/2026-08-06-14-46-01     ← 用户输入/命令行给的
+```
+
+字符不相等，但指的是同一个目录。如果按字符串精确匹配，会话统计会少一半，
+清理也会漏掉一半。本工具在比较前统一做路径归一化（大小写 + 分隔符 + 尾斜杠），
+所以两边的会话都能算准、都能删掉。
+
+### projects 目录名的规则不同
+
+会话历史目录名是路径变形来的，两边规则不一样：
+
+```
+macOS    /Users/foo/WorkBuddy AI/x      →  Users-foo-WorkBuddy AI-x
+Windows  C:\Users\foo\WorkBuddy\x       →  c-Users-foo-WorkBuddy-x
+```
+
+Windows 上盘符要转小写，而且 `C:\` 整体只产生**一个** `-`。
+沿用 macOS 那套「冒号换 -、分隔符换 -」会算出 `c--Users-foo`（双横线），
+跟磁盘上的真实目录名一条都对不上。
+
+### 孤儿历史目录（`--orphans`）
+
+Windows 上真正占空间的是这个：任务删了、工作空间记录也没了，
+但 `projects\` 下那份会话历史原样躺着。几百 MB 很常见，
+而且这些目录**不会**出现在侧边栏，你根本看不见。
+
+```powershell
+wbclean scan                 # 会列出孤儿目录数量和总占用
+wbclean clean --orphans --dry-run    # 先看会删什么
+wbclean clean --orphans              # 执行
+```
+
+判定链条三步，缺一不可：
+
+1. 目录名不在 `workspaces` 表里 —— 不是现役工作空间；
+2. 用 `sessions.cwd` 反查它的真实路径，查不到才退回按目录名反解；
+3. **真实路径仍然存在** —— 说明只是记录没了、目录你还在用，**不动**。
+
+第 3 步是关键。实测中 43 个"孤儿"里有 7 个对应的目录其实还在
+（E 盘两个游戏目录、`~/LightOps` 等，合计 178 MB），一刀切会误删。
+工具宁可少删，也不碰还在用的目录。
+
+### 进程检测
+
+macOS 用 `pgrep` + `lsof`，Windows 两个都没有。换成：
+
+- **进程枚举**：直接调 Windows API 查 `WorkBuddy*.exe`，不起 `tasklist` 子进程
+  （部分机器上系统工具会被安全策略拦掉，那会变成"检测不到应用在跑"这种最危险的误判）；
+- **文件占用**：用共享模式 0 独占打开 `workbuddy.db`，能开说明没人持有句柄。
+
+WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
+确认任务管理器里没有 `WorkBuddy.exe` 再执行写命令。
 
 ---
 
@@ -251,8 +389,10 @@ WBCLEAN_APP_HOME=/path/to/.workbuddy-ai wbclean scan
 **不硬编码任何具体的工作空间路径。** 做法是：
 
 1. 读 `workspaces` 表的全部记录，每条记录里存着工作空间的绝对路径；
-2. 对每个路径用 `os.path.isdir()` **实时判断文件夹现在还在不在**；
-3. 文件夹已消失 → 空壳；还在 → 保留。
+2. 路径先做归一化（大小写、斜杠、尾分隔符），Windows 上同一个目录的
+   `C:\...` 和 `C:/...` 两种写法才会归到同一条记录上；
+3. 对每个路径用 `os.path.isdir()` **实时判断文件夹现在还在不在**；
+4. 文件夹已消失 → 空壳；还在 → 保留。
 
 所以即使你改过 WorkBuddy 的「默认保存路径」，新旧工作空间也一视同仁。
 
@@ -265,7 +405,8 @@ WBCLEAN_APP_HOME=/path/to/.workbuddy-ai wbclean scan
 | 目录仍然存在的工作空间记录 | **保留** |
 | `deleted_at` 为空的存活会话 | **保留**（结果里会列出提醒） |
 | `workspace-display-names.json` 中指向已消失路径的条目 | 删除 |
-| 任何本地文件夹 | **不动**（除非显式加 `--history`） |
+| `projects` 下不属于任何工作空间、且目标路径已消失的历史目录 | 仅在加 `--orphans` 时删除 |
+| 任何本地文件夹 | **不动**（除非显式加 `--history` / `--orphans`） |
 | `deleted_at` 为空的会话（除非加 `--sessions`） | **不动** |
 
 ---
@@ -278,7 +419,9 @@ WBCLEAN_APP_HOME=/path/to/.workbuddy-ai wbclean scan
 | **自动备份** | 每次写操作前，用 SQLite 在线备份 API 生成一致性快照到 `~/WorkBuddy清理备份/<时间戳>/` |
 | **事务回滚** | 写操作包在事务里，出错自动 `ROLLBACK`，数据库保持原样 |
 | **schema 探测** | 开跑前校验必需的表和字段，对不上就列出缺失项并以退出码 2 退出，不带假设改数据 |
-| **路径越界防护** | `--history` 删除前校验目标路径确实位于 `~/.workbuddy-ai/projects/` 之内 |
+| **路径越界防护** | `--history` / `--orphans` 删除前校验目标路径确实位于数据目录的 `projects/` 之内 |
+| **孤儿目录三步判定** | 先排除现役工作空间，再用 `sessions.cwd` 反查真实路径，最后确认该路径已消失；任一条件不满足就保留 |
+| **跨平台进程检测** | macOS 用 `pgrep` + `lsof`，Windows 用 Win32 API 枚举进程 + 独占句柄试探；检测不到时宁可中止也不冒险写入 |
 | **缓存清理白名单** | 只删写死的 6 个目录；`blobs` / `projects` / `app/session` / 数据库 / 工作空间不在名单内，代码里不存在删它们的路径 |
 | **二次路径校验** | 缓存清理逐项删除前，再确认目标路径位于数据目录之内，防止配置被改坏后误删 |
 | **只读连接** | `scan` / `stats` / `cache` / `report` / `backup` 使用 SQLite 只读 URI 或不碰数据库，运行中的应用不受影响 |
@@ -290,8 +433,8 @@ WBCLEAN_APP_HOME=/path/to/.workbuddy-ai wbclean scan
 | 项 | 状态 |
 | :--- | :--- |
 | macOS | 支持（主要开发与测试平台） |
+| Windows | 支持（Windows 10 / 11，进程检测走 Win32 API，无需 `lsof`） |
 | Linux | 理论可用，未实测 |
-| Windows | **暂不支持**（缺启动器，且进程占用检测依赖 `lsof`） |
 | Python | 3.7 及以上 |
 | 第三方依赖 | 无 |
 
@@ -329,6 +472,25 @@ WorkBuddy 运行时会持有数据库连接和 WAL 文件。并发写入有损�
 ```bash
 wbclean cache --clean --keep-days 7
 ```
+
+**Windows 上双击 `wbclean.bat` 窗口一闪就没了？**
+说明 Python 没找到，脚本退出前打印了错误但窗口已经关了。
+在 PowerShell 里跑一次看具体报错：
+
+```powershell
+python bin\wbclean --version
+```
+
+如果提示找不到 Python，装一个（安装时勾上 Add python.exe to PATH）再试。
+
+**Windows 上提示「Python 3.7+ not found」，但我明明装了？**
+商店版 Python 有个 `WindowsApps\python.exe` 的占位符会抢先响应 `python` 命令，
+它只是个跳转壳。用 `py -3 --version` 确认真实解释器在不在；
+在的话用 `py -3 bin\wbclean scan` 直接调用即可。
+
+**侧边栏条目数跟 `scan` 报的不一样？**
+`scan` 统计的是数据库里的记录数，侧边栏可能只显示当前挂载了会话的那部分，
+而且应用不重启不会刷新列表。以 `scan` 的数字为准，清理后重启应用对照。
 
 ---
 

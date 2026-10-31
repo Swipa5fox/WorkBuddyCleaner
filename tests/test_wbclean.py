@@ -203,8 +203,10 @@ class PathMappingTests(unittest.TestCase):
 
     def test_slash_becomes_dash(self):
         p = mod.project_dir_for("/Users/foo/WorkBuddy AI/2026-10-08-10-32-41")
-        self.assertTrue(p.endswith(
-            "Users-foo-WorkBuddy AI-2026-10-08-10-32-41"))
+        key = mod.project_dir_key(
+            "/Users/foo/WorkBuddy AI/2026-10-08-10-32-41", is_win=False)
+        self.assertTrue(key == "Users-foo-WorkBuddy AI-2026-10-08-10-32-41")
+        self.assertTrue(p.endswith(key))
 
     def test_resolved_path_inside_projects(self):
         target = mod.project_dir_for("/Users/foo/x")
@@ -213,6 +215,78 @@ class PathMappingTests(unittest.TestCase):
     def test_outside_path_rejected(self):
         self.assertFalse(mod.safe_under("/etc/passwd", mod.PROJECTS_DIR))
         self.assertFalse(mod.safe_under("/tmp", mod.PROJECTS_DIR))
+
+
+class WindowsPathKeyTests(unittest.TestCase):
+    """Windows 的 projects 目录名规则 —— 跟 macOS 不是同一套。
+
+    这些用例在 macOS 上也会跑：project_dir_key 支持显式指定平台，
+    所以 CI 两个系统上都能验证同一份逻辑，不用等到 Windows 才发现错。
+    """
+
+    def key(self, p):
+        return mod.project_dir_key(p, is_win=True)
+
+    def test_drive_lowercased_and_backslashes(self):
+        self.assertEqual(
+            self.key(r"C:\Users\Administrator\WorkBuddy\2026-08-06-14-46-01"),
+            "c-Users-Administrator-WorkBuddy-2026-08-06-14-46-01")
+
+    def test_forward_slashes_same_result(self):
+        """库里同一个目录有正反两种写法，必须算出同一个 key。
+
+        这是最容易踩的坑：按 macOS 那套「冒号换 -、分隔符换 -」
+        算出来是 c--Users-...（两个横线），跟磁盘上的目录名对不上。
+        """
+        back = self.key(r"C:\Users\Administrator\WorkBuddy\2026-08-06-14-46-01")
+        fwd = self.key("C:/Users/Administrator/WorkBuddy/2026-08-06-14-46-01")
+        self.assertEqual(back, fwd)
+        self.assertNotIn("--", back)
+
+    def test_other_drive(self):
+        self.assertEqual(
+            self.key(r"D:\GitHub\A Struggle With Sin Walkthrough_0.62.0"),
+            "d-GitHub-A Struggle With Sin Walkthrough_0.62.0")
+
+    def test_trailing_separator_ignored(self):
+        self.assertEqual(self.key("C:\\Users\\foo\\"),
+                         self.key("C:\\Users\\foo"))
+
+    def test_case_of_drive_only(self):
+        """盘符统一小写，其余部分原样保留（用户目录可能真有大写）。"""
+        self.assertEqual(self.key("c:\\Users\\Foo"),
+                         self.key("C:\\Users\\Foo"))
+
+    def test_reverse_key_roundtrip(self):
+        path = r"C:\Users\Administrator\LightOps"
+        key = self.key(path)
+        self.assertEqual(mod.path_from_project_key(key, is_win=True), path)
+
+    def test_macos_has_no_reverse(self):
+        self.assertIsNone(mod.path_from_project_key("Users-foo-x", is_win=False))
+
+
+class NormPathTests(unittest.TestCase):
+    """路径归一化 —— 会话归属统计能不能算准全靠它。"""
+
+    def test_slashes_unified_on_windows(self):
+        if not mod.IS_WIN:
+            self.skipTest("只在 Windows 上有意义")
+        self.assertEqual(mod.norm_path(r"C:\Users\a\b"),
+                         mod.norm_path("C:/Users/a/b"))
+
+    def test_case_unified_on_windows(self):
+        if not mod.IS_WIN:
+            self.skipTest("只在 Windows 上有意义")
+        self.assertEqual(mod.norm_path(r"C:\Users\A\B"),
+                         mod.norm_path(r"c:\users\a\b"))
+
+    def test_trailing_separator_stripped(self):
+        self.assertEqual(mod.norm_path("/tmp/a/"), mod.norm_path("/tmp/a"))
+
+    def test_empty(self):
+        self.assertEqual(mod.norm_path(""), "")
+        self.assertEqual(mod.norm_path(None), "")
 
 
 class CacheTests(unittest.TestCase):
@@ -255,10 +329,15 @@ class CacheTests(unittest.TestCase):
                              "受保护路径 %s 不该出现在清理白名单" % bad)
 
     def test_targets_follow_app_home(self):
-        """--app-home 改 APP_HOME 后，目标路径必须跟着变。"""
+        """--app-home 改 APP_HOME 后，目标路径必须跟着变。
+
+        Windows 上的 LocalAppData 日志是个例外：它本来就不在数据目录里，
+        自带 root 字段声明边界，只要求落在自己声明的根内。
+        """
         rows = mod.cache_targets()
         for r in rows:
-            self.assertTrue(r["path"].startswith(self.tmp),
+            root = r.get("root", self.tmp)
+            self.assertTrue(r["path"].startswith(root),
                             "%s 未跟随 APP_HOME" % r["name"])
 
     def test_purge_removes_everything(self):
@@ -297,6 +376,141 @@ class CacheTests(unittest.TestCase):
     def test_purge_missing_dir_is_noop(self):
         self.assertEqual(
             mod.purge_dir_contents(os.path.join(self.tmp, "nope")), 0)
+
+
+class SameDirTwoSpellingsTests(unittest.TestCase):
+    """同一个目录在库里存了两种斜杠写法 —— 统计和删除都不能漏。
+
+    Windows 上这是常态：文件系统给的是 C:\\Users\\a\\b，用户手输或命令行
+    给的是 C:/Users/a/b。原版按 cwd 字符串精确匹配，一半会话会漏掉。
+    """
+
+    def setUp(self):
+        if not mod.IS_WIN:
+            self.skipTest("路径归一化差异只在 Windows 上出现")
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "t.db")
+        self.ws = os.path.join(self.tmp, "ws")
+        os.makedirs(self.ws)
+        self.ws_fwd = self.ws.replace("\\", "/")
+
+        conn = sqlite3.connect(self.db)
+        conn.executescript(SCHEMA_SQL)
+        conn.execute("INSERT INTO workspaces VALUES (?, ?)", (self.ws, 1))
+        # 三条软删 + 一条存活，正反斜杠各一半
+        conn.execute("INSERT INTO sessions VALUES ('s1', ?, 'done', 1)", (self.ws,))
+        conn.execute("INSERT INTO sessions VALUES ('s2', ?, 'done', 1)", (self.ws_fwd,))
+        conn.execute("INSERT INTO sessions VALUES ('s3', ?, 'done', 1)", (self.ws,))
+        conn.execute("INSERT INTO sessions VALUES ('s4', ?, 'done', NULL)", (self.ws_fwd,))
+        conn.commit()
+        conn.close()
+
+        self.orig_projects = mod.PROJECTS_DIR
+        mod.PROJECTS_DIR = os.path.join(self.tmp, "projects")
+
+    def tearDown(self):
+        mod.PROJECTS_DIR = self.orig_projects
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_counts_both_spellings(self):
+        conn = sqlite3.connect(self.db)
+        data = mod.collect(conn, verify=True)
+        conn.close()
+        self.assertEqual(len(data["alive"]), 1)
+        item = data["alive"][0]
+        self.assertEqual(item["sessions_total"], 4)
+        self.assertEqual(item["sessions_soft_deleted"], 3)
+        self.assertEqual(item["sessions_alive"], 1)
+
+    def test_delete_catches_both_spellings(self):
+        # 把目录删掉，让它变成空壳，走一遍真实删除路径
+        shutil.rmtree(self.ws)
+        conn = sqlite3.connect(self.db)
+        data = mod.collect(conn, verify=True)
+        self.assertEqual(len(data["dead"]), 1)
+        mod.do_clean(conn, data["dead"])
+        conn.commit()
+        left = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        survive = conn.execute("SELECT id FROM sessions").fetchall()
+        conn.close()
+        self.assertEqual(left, 1, "只该剩下那条没软删的会话")
+        self.assertEqual(survive[0][0], "s4")
+
+
+class OrphanProjectTests(unittest.TestCase):
+    """孤儿历史目录判定 —— 宁可少删，不能误删还在用的目录。"""
+
+    SCHEMA = SCHEMA_SQL
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.orig_projects = mod.PROJECTS_DIR
+        mod.PROJECTS_DIR = os.path.join(self.tmp, "projects")
+        os.makedirs(mod.PROJECTS_DIR)
+
+        self.alive = os.path.join(self.tmp, "alive")
+        self.keep = os.path.join(self.tmp, "keepdir")
+        self.gone = os.path.join(self.tmp, "gonedir")
+        os.makedirs(self.alive)
+        os.makedirs(self.keep)
+
+        # 给每个目录造一份"历史"
+        for p in (self.alive, self.keep, self.gone):
+            d = os.path.join(mod.PROJECTS_DIR, mod.project_dir_key(p))
+            os.makedirs(d)
+            with open(os.path.join(d, "history.jsonl"), "wb") as f:
+                f.write(b"\0" * 512)
+
+        self.db = os.path.join(self.tmp, "t.db")
+        conn = sqlite3.connect(self.db)
+        conn.executescript(self.SCHEMA)
+        conn.execute("INSERT INTO workspaces VALUES (?, ?)", (self.alive, 1))
+        conn.execute("INSERT INTO sessions VALUES ('s1', ?, 'done', NULL)",
+                     (self.keep,))
+        conn.execute("INSERT INTO sessions VALUES ('s2', ?, 'done', 1)",
+                     (self.gone,))
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        mod.PROJECTS_DIR = self.orig_projects
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _find(self, rows, path):
+        key = mod.project_dir_key(path)
+        return [r for r in rows if r["name"] == key]
+
+    def test_active_workspace_excluded(self):
+        conn = sqlite3.connect(self.db)
+        rows = mod.find_orphan_projects(conn)
+        conn.close()
+        self.assertEqual(self._find(rows, self.alive), [],
+                         "现役工作空间的历史目录不算孤儿")
+
+    def test_kept_when_target_still_exists(self):
+        conn = sqlite3.connect(self.db)
+        rows = mod.find_orphan_projects(conn)
+        conn.close()
+        hit = self._find(rows, self.keep)
+        self.assertEqual(len(hit), 1)
+        self.assertFalse(hit[0]["deletable"],
+                         "目标目录还在，只是记录没了，不能删")
+        self.assertTrue(hit[0]["source_exists"])
+
+    def test_gone_target_is_deletable(self):
+        conn = sqlite3.connect(self.db)
+        rows = mod.find_orphan_projects(conn)
+        conn.close()
+        hit = self._find(rows, self.gone)
+        self.assertEqual(len(hit), 1)
+        self.assertTrue(hit[0]["deletable"])
+        self.assertGreater(hit[0]["size"], 0)
+
+    def test_missing_projects_dir_is_noop(self):
+        mod.PROJECTS_DIR = os.path.join(self.tmp, "nope")
+        conn = sqlite3.connect(self.db)
+        self.assertEqual(mod.find_orphan_projects(conn), [])
+        conn.close()
 
 
 if __name__ == "__main__":

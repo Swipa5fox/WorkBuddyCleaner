@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
         python: ["3.9", "3.13"]
 
     steps:
@@ -24,12 +24,13 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: 运行单元测试
-        run: python3 tests/test_wbclean.py
+        run: python tests/test_wbclean.py
 
       - name: 语法检查
-        run: python3 -m py_compile bin/wbclean
+        run: python -m py_compile bin/wbclean
 
       - name: 命令行自检（无 WorkBuddy 环境）
+        shell: bash
         run: |
-          python3 bin/wbclean --version
-          python3 bin/wbclean report --format json | python3 -c "import json,sys; d=json.load(sys.stdin); print('report JSON 合法，schema_ok =', d['app']['schema_ok'])"
+          python bin/wbclean --version
+          python bin/wbclean report --format json | python -c "import json,sys; d=json.load(sys.stdin); print('report JSON 合法，schema_ok =', d['app']['schema_ok'])"
