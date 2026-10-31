@@ -132,7 +132,9 @@ if ($inPath) {
 } else {
     Write-Host "  [注意] $Prefix 不在 PATH 里，装完还要跑一次：" -ForegroundColor Yellow
     Write-Host ''
-    Write-Host "      setx PATH `"`$env:PATH;$Prefix`""
+    # 用 .NET API 而不是 setx：setx 会把超过 1024 字符的 PATH 截断
+    Write-Host "      `$p = [Environment]::GetEnvironmentVariable('Path','User')"
+    Write-Host "      [Environment]::SetEnvironmentVariable('Path', `"`$p;$Prefix`", 'User')"
     Write-Host ''
     Write-Host '  然后关掉当前窗口重新打开，让新 PATH 生效。'
 }

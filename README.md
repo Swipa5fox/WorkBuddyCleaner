@@ -1,5 +1,6 @@
 # WorkBuddy Cleaner
 
+![Version](https://img.shields.io/badge/version-1.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.7%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
@@ -21,6 +22,7 @@ macOS 与 Windows 用**同一份代码**，差异只在数据目录、进程检�
 ## 目录
 
 - [这是什么](#这是什么)
+- [下载](#下载)
 - [免责声明](#免责声明)
 - [安装](#安装)
 - [用法](#用法)
@@ -28,6 +30,7 @@ macOS 与 Windows 用**同一份代码**，差异只在数据目录、进程检�
 - [工作原理](#工作原理)
 - [安全设计](#安全设计)
 - [兼容性](#兼容性)
+- [版本历史](#版本历史)
 - [常见问题](#常见问题)
 - [反馈问题](#反馈问题)
 - [许可](#许可)
@@ -72,6 +75,39 @@ macOS 与 Windows 用**同一份代码**，差异只在数据目录、进程检�
 
 ---
 
+## 下载
+
+不想 `git clone` 的话，到 [Releases](https://github.com/Swipa5fox/WorkBuddyCleaner/releases/latest)
+下载对应平台的包。**两个平台分开打包**，别下错：
+
+| 平台 | 发布包 | 包里的启动器 | 解压 |
+| :--- | :--- | :--- | :--- |
+| macOS（Linux 同一份） | `wbclean-1.3-macos.tar.gz` | `install.sh`、`wbclean.command` | `tar -xzf wbclean-1.3-macos.tar.gz` |
+| Windows 10 / 11 | `wbclean-1.3-windows.zip` | `install.ps1`、`wbclean.bat` | 右键「全部解压」 |
+
+两个包里的 `bin/wbclean`、`README.md`、`LICENSE` 完全一致，
+差别只在启动脚本：`install.sh` / `wbclean.command` 用 LF 换行且带可执行位，
+`install.ps1` / `wbclean.bat` 用 CRLF 换行（PowerShell 脚本另存为 UTF-8 with BOM，
+否则中文提示在 Windows PowerShell 5.1 下会变乱码）。
+
+> 包里是**脚本**，不是编译好的 exe。两个平台都还需要 Python 3.7+
+> （只要标准库，不用 `pip install`）。Windows 上没装 Python 也能跑 ——
+> 启动器会退到 WorkBuddy 自带的解释器。
+
+校验下载是否完整：
+
+```bash
+# macOS
+shasum -a 256 wbclean-1.3-macos.tar.gz
+
+# Windows（PowerShell）
+Get-FileHash .\wbclean-1.3-windows.zip -Algorithm SHA256
+```
+
+对照 Release 页面里列出的校验值即可。
+
+---
+
 ## 免责声明
 
 **请在使用前完整阅读本节。下载、安装或使用本工具，即表示你已知悉并接受以下全部内容。**
@@ -108,7 +144,8 @@ macOS 与 Windows 用**同一份代码**，差异只在数据目录、进程检�
   但**仍存在数据丢失的可能性**。
 - 因使用本工具造成的任何直接或间接损失 —— 包括但不限于数据丢失、软件异常、
   配置损坏、工作中断、设备损坏 —— **作者不承担任何责任**。
-- **建议**：首次使用前，自行完整备份 `~/.workbuddy-ai/` 目录。
+- **建议**：首次使用前，自行完整备份数据目录
+  （macOS 为 `~/.workbuddy-ai/`，Windows 为 `%USERPROFILE%\.workbuddy\`）。
 
 ### 五、无担保
 
@@ -121,11 +158,16 @@ macOS 与 Windows 用**同一份代码**，差异只在数据目录、进程检�
 
 **环境要求**：Python 3.7 及以上。只用标准库，无需 `pip install`。
 
+两种方式选一种：**下载发布包**（见 [下载](#下载)）解开直接 `install`，
+或者 `git clone` 整个仓库。下面的命令都以解压后的目录（或仓库根目录）为当前目录。
+
 ### macOS / Linux
 
 ```bash
-git clone https://github.com/Swipa5fox/WorkBuddyCleaner.git
-cd WorkBuddyCleaner
+# 解压发布包，或 git clone 后 cd 进去
+tar -xzf wbclean-1.3-macos.tar.gz
+cd wbclean-1.3-macos
+
 ./install.sh
 ```
 
@@ -151,11 +193,12 @@ wbclean scan
 ### Windows
 
 先装 Python（[python.org](https://www.python.org/downloads/windows/)，安装时勾上
-**Add python.exe to PATH**）。然后用 PowerShell 跑安装脚本：
+**Add python.exe to PATH**）。没装也能先跑起来，启动器会退到 WorkBuddy 自带的解释器，
+但装一个更省事。
+
+解压 `wbclean-1.3-windows.zip`（或 `git clone` 后进入目录），在该目录打开 PowerShell：
 
 ```powershell
-git clone https://github.com/Swipa5fox/WorkBuddyCleaner.git
-cd WorkBuddyCleaner
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
@@ -168,23 +211,28 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Prefix D:\tools\wbclean
 包装器生成后，按脚本提示把该目录加进 PATH（脚本只打印命令，不擅自改系统设置）：
 
 ```powershell
-setx PATH "$env:PATH;%LOCALAPPDATA%\wbclean"
+$p = [Environment]::GetEnvironmentVariable('Path', 'User')
+[Environment]::SetEnvironmentVariable('Path', "$p;$env:LOCALAPPDATA\wbclean", 'User')
 ```
 
-然后**重开一个终端窗口**，验证：
+> 别用 `setx PATH "..."`：超过 1024 字符的 PATH 会被它**截断**，
+> 上面的 .NET 写法没有这个坑。改的是「用户变量」，不影响系统级 PATH。
+
+然后**关掉当前窗口重新打开**（PATH 只在启动时读一次），验证：
 
 ```powershell
 wbclean --version
 wbclean scan
 ```
 
-不想装也行 —— 仓库根目录的 `wbclean.bat` 双击就能开菜单：
+不想装也行 —— 解压目录里的 `wbclean.bat` 双击就能开菜单：
 
 ```
 wbclean.bat          →  交互式菜单
 ```
 
-**卸载**：删掉 `%LOCALAPPDATA%\wbclean` 目录，再从 PATH 里去掉那一项。
+**卸载**：删掉 `%LOCALAPPDATA%\wbclean` 目录，再从 PATH 里去掉那一项
+（备份目录 `%USERPROFILE%\WorkBuddy清理备份\` 需手动删除）。
 
 ---
 
@@ -213,8 +261,8 @@ wbclean.bat          →  交互式菜单
 wbclean menu
 ```
 
-macOS 上也可以双击仓库根目录的 `wbclean.command`。
-Windows 上双击 `wbclean.bat`（或 `%LOCALAPPDATA%\wbclean\wbclean.cmd` 的快捷方式）。
+macOS 上也可以双击解压目录里的 `wbclean.command`。
+Windows 上双击 `wbclean.bat`（装过的话，`%LOCALAPPDATA%\wbclean\wbclean.cmd` 也行）。
 
 ### 常用参数
 
@@ -317,7 +365,7 @@ $env:WBCLEAN_APP_HOME = "D:\backup\.workbuddy"; wbclean scan
 | 数据库 | `~/.workbuddy-ai/workbuddy.db` | `%USERPROFILE%\.workbuddy\workbuddy.db` |
 | 工作空间根 | `~/WorkBuddy AI` | `%USERPROFILE%\WorkBuddy` |
 | 会话历史 | `~/.workbuddy-ai/projects/` | 同左 |
-| 备份目录 | `~/WorkBuddy清理备份/` | 同左（`--app-home` 时跟着数据目录走） |
+| 备份目录 | `~/WorkBuddy清理备份/` | `%USERPROFILE%\WorkBuddy清理备份\`（用 `--app-home` 时跟着数据目录走） |
 
 数据库表结构两边一致（`workspaces` / `sessions`），所以扫描和清理逻辑通用。
 
@@ -423,7 +471,7 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 | **路径越界防护** | `--history` / `--orphans` 删除前校验目标路径确实位于数据目录的 `projects/` 之内 |
 | **孤儿目录三步判定** | 先排除现役工作空间，再用 `sessions.cwd` 反查真实路径，最后确认该路径已消失；任一条件不满足就保留 |
 | **跨平台进程检测** | macOS 用 `pgrep` + `lsof`，Windows 用 Win32 API 枚举进程 + 独占句柄试探；检测不到时宁可中止也不冒险写入 |
-| **缓存清理白名单** | 只删写死的 6 个目录；`blobs` / `projects` / `app/session` / 数据库 / 工作空间不在名单内，代码里不存在删它们的路径 |
+| **缓存清理白名单** | 只删代码里写死的固定目录（macOS 6 个、Windows 7 个）；`blobs` / `projects` / `app/session` / 数据库 / 工作空间不在名单内，代码里不存在删它们的路径 |
 | **二次路径校验** | 缓存清理逐项删除前，再确认目标路径位于数据目录之内，防止配置被改坏后误删 |
 | **只读连接** | `scan` / `stats` / `cache` / `report` / `backup` 使用 SQLite 只读 URI 或不碰数据库，运行中的应用不受影响 |
 
@@ -435,9 +483,23 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 | :--- | :--- |
 | macOS | 支持（主要开发与测试平台） |
 | Windows | 支持（Windows 10 / 11，进程检测走 Win32 API，无需 `lsof`） |
-| Linux | 理论可用，未实测 |
-| Python | 3.7 及以上 |
+| Linux | 理论可用，未实测（发布包用 `wbclean-1.3-macos.tar.gz` 那份） |
+| Python | 3.7 及以上（CI 覆盖 3.9 与 3.13） |
 | 第三方依赖 | 无 |
+| 发布包 | `wbclean-1.3-macos.tar.gz` / `wbclean-1.3-windows.zip` |
+
+---
+
+## 版本历史
+
+| 版本 | 主要变化 |
+| :--- | :--- |
+| **1.3** | **支持 Windows**（与 macOS 同一份代码，发布包分开）；新增孤儿历史目录清理 `clean --orphans`；`clean` 结束时写 `deleted.json` 删除清单；备份目录跟随 `--app-home`；菜单扩到 10 项 |
+| 1.2 | 新增缓存清理，分安全 / 深度两级，白名单制 |
+| 1.1 | 首个公开版本：扫描、清理空壳、备份、还原、诊断报告 |
+
+升级方式：覆盖安装即可（`install.sh` / `install.ps1` 会先备份旧版本）。
+数据库结构没变，备份可以跨版本还原。
 
 ---
 
@@ -474,6 +536,11 @@ WorkBuddy 运行时会持有数据库连接和 WAL 文件。并发写入有损�
 ```bash
 wbclean cache --clean --keep-days 7
 ```
+
+**下错包了怎么办？**
+看扩展名区分：`.zip` 是 Windows 包，`.tar.gz` 是 macOS 包。内容里的 `bin/wbclean`
+完全一样，差别只在启动脚本的换行符和可执行位。Windows 上下错成 `.tar.gz`
+会解出一堆 CRLF 不匹配的脚本，双击 `install.sh` 自然没反应。
 
 **Windows 上双击 `wbclean.bat` 窗口一闪就没了？**
 说明 Python 没找到，脚本退出前打印了错误但窗口已经关了。
