@@ -6,13 +6,20 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  # Windows 上 python 输出到管道时用的是 ANSI 代码页（cp1252），
+  # 打印中文直接 UnicodeEncodeError。工具本身把 stdout 切成 UTF-8，
+  # 这里也给 CI 里那两个内联脚本兜个底。
+  PYTHONIOENCODING: utf-8
+
 jobs:
   unit:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        # ubuntu-latest 已经滚到 26.04，上面装不了 Python 3.9，钉到 24.04
+        os: [macos-latest, ubuntu-24.04, windows-latest]
         python: ["3.9", "3.13"]
 
     steps:
@@ -33,4 +40,50 @@ jobs:
         shell: bash
         run: |
           python bin/wbclean --version
-          python bin/wbclean report --format json | python -c "import json,sys; d=json.load(sys.stdin); print('report JSON 合法，schema_ok =', d['app']['schema_ok'])"
+          python bin/wbclean report --format json | python -c "import json,sys; d=json.load(sys.stdin); print('report JSON ok, schema_ok =', d['app']['schema_ok'])"
+
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 打发布包
+        run: python tools/package.py
+
+      - name: 校验发布包
+        run: |
+          python - <<'PY'
+          import glob, tarfile, zipfile, sys
+
+          tars = glob.glob("dist/*-macos.tar.gz")
+          zips = glob.glob("dist/*-windows.zip")
+          assert len(tars) == 1 and len(zips) == 1, (tars, zips)
+
+          # macOS 包：shebang 脚本必须 LF + 0755
+          with tarfile.open(tars[0]) as t:
+              members = {m.name.split("/", 1)[1]: m for m in t.getmembers()}
+              for name in ("bin/wbclean", "install.sh", "wbclean.command"):
+                  m = members[name]
+                  assert m.mode & 0o111, "%s 缺可执行位" % name
+                  data = t.extractfile(m).read()
+                  assert b"\r\n" not in data, "%s 混进了 CRLF" % name
+              assert "install.ps1" not in members, "macOS 包里不该有 Windows 启动脚本"
+
+          # Windows 包：.ps1 必须 UTF-8 BOM + CRLF，.bat 必须 CRLF
+          with zipfile.ZipFile(zips[0]) as z:
+              names = {n.split("/", 1)[1] for n in z.namelist()}
+              assert "install.ps1" in names and "wbclean.bat" in names
+              assert "install.sh" not in names, "Windows 包里不该有 macOS 启动脚本"
+              ps1 = z.read([n for n in z.namelist() if n.endswith("install.ps1")][0])
+              assert ps1[:3] == b"\xef\xbb\xbf", "install.ps1 少了 BOM"
+              assert b"\r\n" in ps1
+              bat = z.read([n for n in z.namelist() if n.endswith("wbclean.bat")][0])
+              assert b"\r\n" in bat and bat.count(b"\n") == bat.count(b"\r\n")
+
+          print("发布包校验通过")
+          PY
