@@ -36,10 +36,13 @@ if not defined PY_CMD (
 )
 
 rem ---- fall back to the interpreter bundled with WorkBuddy
+rem  Note the quoting difference: "py -3" is a command plus argument and must
+rem  stay unquoted, while an absolute .exe path may contain spaces and has to
+rem  be quoted as a whole. Both forms expand correctly in the call below.
 if not defined PY_CMD (
     if exist "%USERPROFILE%\.workbuddy\binaries\python\versions" (
         for /d %%D in ("%USERPROFILE%\.workbuddy\binaries\python\versions\*") do (
-            if exist "%%D\python.exe" set "PY_CMD=%%D\python.exe"
+            if exist "%%D\python.exe" set PY_CMD="%%D\python.exe"
         )
     )
 )
