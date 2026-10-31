@@ -58,7 +58,7 @@ import unicodedata
 import urllib.parse
 from types import SimpleNamespace
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
@@ -1114,6 +1114,7 @@ def cmd_clean(args):
             print(C_OK + "  显示名配置删除 %d 条" % n_names + C_0)
 
     # 历史文件夹
+    removed_history, failed_history = [], []
     if history_targets:
         freed = 0
         print()
@@ -1121,13 +1122,16 @@ def cmd_clean(args):
             try:
                 shutil.rmtree(cand)
                 freed += sz
+                removed_history.append({"dir": cand, "bytes": sz})
                 print("    - %s (%s)" % (os.path.basename(cand), human_size(sz)))
             except Exception as e:
+                failed_history.append({"dir": cand, "error": str(e)})
                 print("    " + C_WARN + "跳过 %s: %s" % (cand, e) + C_0)
         if freed:
             print(C_OK + "  释放 %s" % human_size(freed) + C_0)
 
     # 孤儿历史目录
+    removed_orphans, failed_orphans = [], []
     if orphan_targets:
         freed = 0
         print()
@@ -1135,13 +1139,16 @@ def cmd_clean(args):
         for cand, sz, name in orphan_targets:
             # 二次护栏：必须在 projects 目录内
             if not safe_under(cand, PROJECTS_DIR):
+                failed_orphans.append({"dir": cand, "error": "不在 projects 内"})
                 print("    " + C_WARN + "跳过（不在 projects 内）：%s" % cand + C_0)
                 continue
             try:
                 shutil.rmtree(cand)
                 freed += sz
+                removed_orphans.append({"dir": cand, "bytes": sz, "name": name})
                 print("    - %s (%s)" % (name[:46], human_size(sz)))
             except Exception as e:
+                failed_orphans.append({"dir": cand, "error": str(e)})
                 print("    " + C_WARN + "跳过 %s: %s" % (cand, e) + C_0)
         if freed:
             print(C_OK + "  释放 %s" % human_size(freed) + C_0)
@@ -1150,6 +1157,35 @@ def cmd_clean(args):
         print("\n  " + C_WARN + "保留的存活会话：" + C_0)
         for item in skipped_alive:
             print("    · %s（%d 条）" % (item["name"], item["sessions_alive"]))
+
+    # ---- 删除清单：写进备份目录，事后能核对到底删了什么
+    manifest = {
+        "cleaned_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "version": VERSION,
+        "db": args.db,
+        "workspaces": [
+            {
+                "path": i["path"],
+                "name": i["name"],
+                "last_opened_at": i["last_opened"],
+                "sessions_deleted": i["sessions_soft_deleted"],
+                "sessions_kept": i["sessions_alive"],
+            } for i in dead
+        ],
+        "sessions_deleted": deleted_sessions + deleted_extra,
+        "display_names_deleted": n_names,
+        "history_dirs": {"removed": removed_history, "skipped": failed_history},
+        "orphan_dirs": {"removed": removed_orphans, "skipped": failed_orphans},
+        "freed_bytes": sum(d["bytes"] for d in removed_history)
+                       + sum(d["bytes"] for d in removed_orphans),
+    }
+    manifest_path = os.path.join(dest_dir, "deleted.json")
+    try:
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("  " + C_WARN + "删除清单写入失败: %s" % e + C_0)
+        manifest_path = None
 
     # ---- 校验
     conn = open_ro(args.db)
@@ -1168,6 +1204,8 @@ def cmd_clean(args):
     hr("═")
     print("  剩余工作空间：%d 条（空壳 %d 条）" % (remain, still_dead))
     print("  备份位置：%s" % dest_dir)
+    if manifest_path:
+        print("  删除清单：%s" % manifest_path)
     print()
     print("  " + C_B + "重新打开 WorkBuddy 查看效果。" + C_0)
     if still_dead:

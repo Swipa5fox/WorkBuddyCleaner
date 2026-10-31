@@ -334,6 +334,18 @@ if BACKUP_NAME:
     check("备份含 meta.json", os.path.exists(os.path.join(bdir, "meta.json")))
     check("备份含显示名配置",
           os.path.exists(os.path.join(bdir, "workspace-display-names.json")))
+    check("备份含删除清单", os.path.exists(os.path.join(bdir, "deleted.json")))
+    with open(os.path.join(bdir, "deleted.json"), encoding="utf-8") as f:
+        man = json.load(f)
+    eq("清单记录 3 条工作空间", len(man["workspaces"]), 3)
+    eq("清单记录删除的会话数", man["sessions_deleted"], 4)
+    eq("清单记录 2 个历史目录", len(man["history_dirs"]["removed"]), 2)
+    eq("清单记录 2 个孤儿目录", len(man["orphan_dirs"]["removed"]), 2)
+    check("清单释放字节数 > 0", man["freed_bytes"] > 0, str(man["freed_bytes"]))
+    check("清单里的目录都是绝对路径",
+          all(os.path.isabs(d["dir"]) for d in man["history_dirs"]["removed"]))
+    check("清单记下被删的工作空间路径",
+          any(w["path"] == GONE1 for w in man["workspaces"]), str(man["workspaces"]))
     with open(os.path.join(bdir, "meta.json"), encoding="utf-8") as f:
         meta = json.load(f)
     eq("备份 tag = before-clean", meta.get("tag"), "before-clean")
