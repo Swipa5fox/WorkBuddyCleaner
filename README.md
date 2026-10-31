@@ -317,7 +317,7 @@ $env:WBCLEAN_APP_HOME = "D:\backup\.workbuddy"; wbclean scan
 | 数据库 | `~/.workbuddy-ai/workbuddy.db` | `%USERPROFILE%\.workbuddy\workbuddy.db` |
 | 工作空间根 | `~/WorkBuddy AI` | `%USERPROFILE%\WorkBuddy` |
 | 会话历史 | `~/.workbuddy-ai/projects/` | 同左 |
-| 备份目录 | `~/WorkBuddy清理备份/` | 同左 |
+| 备份目录 | `~/WorkBuddy清理备份/` | 同左（`--app-home` 时跟着数据目录走） |
 
 数据库表结构两边一致（`workspaces` / `sessions`），所以扫描和清理逻辑通用。
 
@@ -451,7 +451,8 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 
 **能恢复吗？**
 可以。每次写操作前自动备份，用 `wbclean restore` 选时间戳还原。
-备份默认在 `~/WorkBuddy清理备份/`，清理前记得看一眼。
+备份默认在 `~/WorkBuddy清理备份/`；用 `--app-home` 指向别处的数据目录时，
+备份会跟着放到那个目录的同级，不会混进 home 里。
 
 **为什么必须退出 WorkBuddy？**
 WorkBuddy 运行时会持有数据库连接和 WAL 文件。并发写入有损坏风险，

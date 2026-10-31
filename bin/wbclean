@@ -58,7 +58,7 @@ import unicodedata
 import urllib.parse
 from types import SimpleNamespace
 
-VERSION = "1.3"
+VERSION = "1.3.1"
 
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
@@ -87,7 +87,18 @@ DB_PATH = os.path.join(APP_HOME, "workbuddy.db")
 DISPLAY_NAMES_PATH = os.path.join(APP_HOME, "workspace-display-names.json")
 PROJECTS_DIR = os.path.join(APP_HOME, "projects")
 WORKSPACE_ROOT = default_workspace_root()
-BACKUP_ROOT = os.path.join(_home(), "WorkBuddy清理备份")
+
+
+def backup_root():
+    """备份目录。默认在用户目录下，--app-home 指到别处时跟着数据目录走。
+
+    不能写死成 ~/WorkBuddy清理备份：那样拿 --app-home 指向一份复制出来的
+    数据目录做实验时，备份仍然写进真实 home，既容易混淆，也让人看不出
+    备份到底是哪个库的。
+    """
+    parent = os.path.dirname(os.path.abspath(APP_HOME).rstrip("\\/")) or _home()
+    return os.path.join(parent, "WorkBuddy清理备份")
+
 
 # ANSI
 C_OK = "\033[32m"
@@ -807,7 +818,7 @@ def make_backup(tag="auto", db_path=None):
     """用 SQLite 在线备份 API 生成一致性快照。应用运行中也可用。"""
     src_path = db_path or DB_PATH
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    dest_dir = os.path.join(BACKUP_ROOT, timestamp)
+    dest_dir = os.path.join(backup_root(), timestamp)
     os.makedirs(dest_dir, exist_ok=True)
 
     dest_db = os.path.join(dest_dir, os.path.basename(src_path))
@@ -854,11 +865,12 @@ def cmd_backup(args):
 # ============================================================ 命令：restore
 
 def list_backups():
-    if not os.path.isdir(BACKUP_ROOT):
+    root = backup_root()
+    if not os.path.isdir(root):
         return []
     out = []
-    for name in sorted(os.listdir(BACKUP_ROOT), reverse=True):
-        d = os.path.join(BACKUP_ROOT, name)
+    for name in sorted(os.listdir(root), reverse=True):
+        d = os.path.join(root, name)
         if not os.path.isdir(d):
             continue
         db = os.path.join(d, os.path.basename(DB_PATH))
@@ -959,6 +971,7 @@ def cmd_clean(args):
     hr("═")
     print(C_B + "  清理空壳工作空间" + C_0)
     hr("═")
+    print("\n  目标数据库 %s%s%s" % (C_DIM, args.db, C_0))
 
     print("\n[1/5] 检查运行状态 ...")
     if args.dry_run:
@@ -1053,7 +1066,7 @@ def cmd_clean(args):
         print("  · 本地文件夹不会被删除"
               + ("（--history / --orphans 指定的除外）"
                  if (args.history or args.orphans) else ""))
-        print("  · 数据库会自动备份到 %s" % BACKUP_ROOT)
+        print("  · 数据库会自动备份到 %s" % backup_root())
         print("  · 操作后需重启 WorkBuddy 生效")
         print()
         try:
@@ -1565,6 +1578,7 @@ def cmd_cache(args):
     hr("═")
     print(C_B + ("  深度清理缓存与日志" if args.deep else "  安全清理缓存与日志") + C_0)
     hr("═")
+    print("\n  数据目录 %s%s%s" % (C_DIM, APP_HOME, C_0))
 
     selected = list(safe_rows) + (deep_rows if args.deep else [])
     selected = [r for r in selected if r["exists"] and r["size"] > 0]
@@ -1581,6 +1595,9 @@ def cmd_cache(args):
         print("    %-18s %10s%s" % (r["name"], human_size(r["size"]), tag))
     print("    %-18s %10s" % ("─" * 16, "─" * 8))
     print("    %-18s %10s" % ("合计", human_size(total)))
+    if not args.deep and deep_total:
+        print("\n  " + C_DIM + "另有深度项 %s 未计入（加 --deep 一起清）"
+              % human_size(deep_total) + C_0)
     if args.keep_days:
         print("\n  日志保留最近 %d 天" % args.keep_days)
 
@@ -1826,6 +1843,9 @@ def main():
         # --db 的默认值在解析时就固化了，这里必须跟着改，
         # 否则 --app-home 只影响部分路径，子命令仍会读默认位置的库。
         args.db = DB_PATH
+        # 指错目录的代价是删掉真实数据，所以这里必须留痕迹：走 stderr，
+        # 不干扰 report --format json 的 stdout。
+        sys.stderr.write("[注意] 使用自定义数据目录：%s\n" % APP_HOME)
 
     try:
         args.func(args)
