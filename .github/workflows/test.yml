@@ -55,6 +55,13 @@ jobs:
       - name: 打发布包
         run: python tools/package.py
 
+      - name: 可重复构建（两次哈希必须一致）
+        run: |
+          python tools/package.py --out /tmp/rebuild >/dev/null
+          ( cd dist && sha256sum * ) > /tmp/h1.txt
+          ( cd /tmp/rebuild && sha256sum * ) > /tmp/h2.txt
+          diff /tmp/h1.txt /tmp/h2.txt && echo "两次构建字节一致"
+
       - name: 校验发布包
         run: |
           python - <<'PY'
@@ -79,6 +86,9 @@ jobs:
               names = {n.split("/", 1)[1] for n in z.namelist()}
               assert "install.ps1" in names and "wbclean.bat" in names
               assert "install.sh" not in names, "Windows 包里不该有 macOS 启动脚本"
+              # create_system 随构建机变化，钉死成 3 才能跨平台打出同样的字节
+              assert all(i.create_system == 3 for i in z.infolist()), \
+                  "create_system 未固定，跨平台构建的哈希会不一致"
               ps1 = z.read([n for n in z.namelist() if n.endswith("install.ps1")][0])
               assert ps1[:3] == b"\xef\xbb\xbf", "install.ps1 少了 BOM"
               assert b"\r\n" in ps1

@@ -94,6 +94,11 @@ def write_zip(path, top, entries):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         for arc, data, mode in entries:
             info = zipfile.ZipInfo(top + "/" + arc, date_time=FIXED_DATE)
+            # create_system 默认随构建机变化（Windows=0 / Unix=3），
+            # 会让同一份源码在 mac 和 Windows 上打出不同的字节，
+            # 发布页公布的 SHA256 就对不上了。这里钉死成 Unix（3），
+            # 权限位本来就已经显式写在 external_attr 里。
+            info.create_system = 3
             info.external_attr = (0o100000 | mode) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             z.writestr(info, data)
