@@ -59,6 +59,9 @@ import urllib.parse
 from types import SimpleNamespace
 
 VERSION = "1.3"
+# 同一个版本号可能被重新构建过（修 bug 但不改对外版本），
+# 带上构建日期，用户反馈问题时才能分清跑的是哪一版。
+BUILD = "2026-11-02"
 
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
@@ -595,6 +598,80 @@ def check_schema(conn):
         sys.exit(2)
 
 
+# ------------------------------------------------------------ 空壳判定
+# 「目录不存在」有两种完全不同的原因：
+#   1. 用户把目录删了 —— 条目确实该清；
+#   2. 目录所在的卷此刻不可达 —— 外置盘拔了、网络盘掉线、Windows 上盘符没连。
+# 第 2 种一旦当成第 1 种处理，等盘插回来，侧边栏里的条目已经没了，
+# 带 --history 时连会话历史都会被一起删掉。
+# 判错的代价不可逆，所以只把「父目录还在、自己不在」认作真的删了。
+
+def _nearest_existing_ancestor(path):
+    """往上找最近一个真实存在的上级目录，找不到返回 None。"""
+    cur = os.path.dirname(path.rstrip("\\/"))
+    for _ in range(64):          # 防御异常路径造成的死循环
+        if not cur or cur == os.sep:
+            return None
+        if os.path.isdir(cur):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+    return None
+
+
+def classify_workspace_path(path):
+    """把「目录在不在」拆成三态，返回 (state, reason)。
+
+    alive   —— 目录在，正常。
+    dead    —— 父目录在、自己不在：可以认定用户删掉了，清理是安全的。
+    suspect —— 卷未挂载 / 盘符未连接 / 上级目录也缺失：不能认定已删除，不动。
+    """
+    try:
+        if os.path.isdir(path):
+            return "alive", ""
+    except OSError as e:
+        # 网络盘超时、权限不足都会走到这里，一律按不可判定处理
+        return "suspect", "无法访问（%s）" % (e.strerror or e)
+
+    if IS_WIN:
+        drive = os.path.splitdrive(path)[0]
+        if drive and not os.path.exists(drive + os.sep):
+            return "suspect", "磁盘未连接（%s）" % drive
+    else:
+        m = re.match(r"^/Volumes/([^/]+)", path)
+        if m and not os.path.exists(os.path.join("/Volumes", m.group(1))):
+            return "suspect", "外置卷未挂载（/Volumes/%s）" % m.group(1)
+
+    parent = os.path.dirname(path.rstrip("\\/"))
+    if parent and os.path.isdir(parent):
+        return "dead", ""
+
+    anc = _nearest_existing_ancestor(path)
+    if anc:
+        return "suspect", "上级目录也不存在（%s）" % anc
+    return "suspect", "上级目录不可达"
+
+
+def print_suspect_block(items, hint=True):
+    """打印「疑似离线」清单。scan 和 clean 共用，避免两处口径不一致。"""
+    if not items:
+        return
+    print("\n  " + C_WARN + "疑似离线，未做处理（%d 条）" % len(items) + C_0)
+    hr()
+    for i, item in enumerate(items, 1):
+        print("  %2d. %s" % (i, item["name"]))
+        print("      %s%s%s" % (C_DIM, item["path"], C_0))
+        print("      " + C_WARN + (item.get("state_reason") or "目录不可达") + C_0)
+    hr()
+    print("\n  这些条目指向的目录此刻访问不到，但很可能只是磁盘没挂载 ——")
+    print("  插回磁盘再跑一次 scan，它们会重新变成正常条目。")
+    if hint:
+        print("  确认目录确实已删除，再用 " + C_B
+              + "wbclean clean --force" + C_0 + " 一并清理。")
+
+
 def collect(conn, verify=True):
     """扫描工作空间与会话，返回结构化数据。只读。"""
     if verify:
@@ -605,10 +682,11 @@ def collect(conn, verify=True):
 
     idx = index_sessions(conn)
 
-    dead, alive = [], []
+    dead, alive, suspect = [], [], []
     for path, last_opened in rows:
         rec = idx.get(norm_path(path)) or {"total": 0, "soft": 0, "soft_ids": []}
         name = os.path.basename(path.rstrip("\\/")) or path
+        state, reason = classify_workspace_path(path)
         item = {
             "path": path,
             "name": name,
@@ -617,9 +695,16 @@ def collect(conn, verify=True):
             "sessions_soft_deleted": rec["soft"],
             "sessions_alive": rec["total"] - rec["soft"],
             "soft_session_ids": rec["soft_ids"],
-            "exists": os.path.isdir(path),
+            "exists": state == "alive",
+            "state": state,
+            "state_reason": reason,
         }
-        (alive if item["exists"] else dead).append(item)
+        if state == "alive":
+            alive.append(item)
+        elif state == "dead":
+            dead.append(item)
+        else:
+            suspect.append(item)
 
     # 全库软删除会话总数
     total_soft = conn.execute(
@@ -630,6 +715,7 @@ def collect(conn, verify=True):
     return {
         "dead": dead,
         "alive": alive,
+        "suspect": suspect,
         "total_soft_sessions": total_soft,
         "total_sessions": total_sessions,
     }
@@ -669,14 +755,18 @@ def find_orphan_projects(conn):
         if name in ws_keys:
             continue
         real = key_to_path.get(name) or path_from_project_key(name)
-        exists = bool(real) and os.path.isdir(real)
+        # 和空壳判定同一套口径：目标目录只是「此刻不可达」时不能删历史
+        state, reason = (classify_workspace_path(real) if real
+                         else ("suspect", "无法从目录名反解源路径"))
         out.append({
             "name": name,
             "dir": full,
             "size": dir_size(full),
             "source_path": real,
-            "source_exists": exists,
-            "deletable": not exists,
+            "source_exists": state == "alive",
+            "source_state": state,
+            "source_reason": reason,
+            "deletable": state == "dead",
         })
     return out
 
@@ -691,15 +781,18 @@ def cmd_scan(args):
     finally:
         conn.close()
 
-    dead, alive = data["dead"], data["alive"]
+    dead, alive, suspect = data["dead"], data["alive"], data["suspect"]
 
     print()
     hr("═")
     print(C_B + "  WorkBuddy 工作空间诊断" + C_0)
     hr("═")
 
-    print("\n  工作空间记录 %d 条：目录正常 %d，目录已消失 %d"
-          % (len(dead) + len(alive), len(alive), len(dead)))
+    summary = "  工作空间记录 %d 条：目录正常 %d，目录已消失 %d" % (
+        len(dead) + len(alive) + len(suspect), len(alive), len(dead))
+    if suspect:
+        summary += "，疑似离线 %d" % len(suspect)
+    print(summary)
     print("  会话记录 %d 条：其中已软删除 %d 条"
           % (data["total_sessions"], data["total_soft_sessions"]))
 
@@ -715,8 +808,10 @@ def cmd_scan(args):
         hr()
         print("\n  清理方法：" + C_B + "wbclean clean" + C_0
               + "（需先退出 WorkBuddy）")
-    else:
+    elif not suspect:
         print("\n  " + C_OK + "没有空壳条目，列表是干净的。" + C_0)
+
+    print_suspect_block(suspect)
 
     if alive:
         print("\n  正常条目：")
@@ -725,7 +820,8 @@ def cmd_scan(args):
 
     # ---- 孤儿历史目录
     dead_orphans = [o for o in orphans if o["deletable"]]
-    kept = [o for o in orphans if not o["deletable"]]
+    kept_alive = [o for o in orphans if o["source_state"] == "alive"]
+    kept_suspect = [o for o in orphans if o["source_state"] == "suspect"]
     if dead_orphans:
         total = sum(o["size"] for o in dead_orphans)
         print("\n  " + C_WARN
@@ -738,9 +834,13 @@ def cmd_scan(args):
             print("    · ... 另外 %d 个" % (len(dead_orphans) - 10))
         print("\n  清理方法：" + C_B + "wbclean clean --orphans" + C_0
               + "（需先退出 WorkBuddy）")
-    if kept:
+    if kept_alive:
         print("\n  " + C_DIM
-              + "另有 %d 个历史目录对应路径仍然存在，保留不动" % len(kept) + C_0)
+              + "另有 %d 个历史目录对应路径仍然存在，保留不动" % len(kept_alive) + C_0)
+    if kept_suspect:
+        print("\n  " + C_DIM
+              + "另有 %d 个历史目录的源路径此刻不可达（疑似离线），保留不动"
+              % len(kept_suspect) + C_0)
 
     print()
 
@@ -987,30 +1087,44 @@ def cmd_clean(args):
     finally:
         conn.close()
 
-    dead, alive = data["dead"], data["alive"]
+    dead, alive, suspect = data["dead"], data["alive"], data["suspect"]
+    # 疑似离线的条目默认一条都不动；只有显式 --force 才进清理目标
+    forced = list(suspect) if getattr(args, "force", False) else []
+    targets = dead + forced
     dead_orphans = [o for o in orphans if o["deletable"]]
-    print("  工作空间 %d 条：正常 %d，空壳 %d"
-          % (len(dead) + len(alive), len(alive), len(dead)))
+    print("  工作空间 %d 条：正常 %d，空壳 %d，疑似离线 %d"
+          % (len(dead) + len(alive) + len(suspect), len(alive), len(dead),
+             len(suspect)))
     if args.orphans:
         print("  孤儿历史目录 %d 个，共 %s"
               % (len(dead_orphans),
                  human_size(sum(o["size"] for o in dead_orphans))))
 
-    if not dead and not (args.sessions and data["total_soft_sessions"]) \
+    if not targets and not (args.sessions and data["total_soft_sessions"]) \
             and not dead_orphans:
+        if suspect:
+            print_suspect_block(suspect)
+            print()
+            return
         print("\n  " + C_OK + "没有需要清理的内容。" + C_0 + "\n")
         return
 
     # ---- 展示
     print("\n[3/5] 待清理内容")
     hr()
-    if dead:
-        for i, item in enumerate(dead, 1):
-            print("  %2d. %s" % (i, item["name"]))
+    if targets:
+        for i, item in enumerate(targets, 1):
+            mark = ""
+            if item["state"] == "suspect":
+                mark = "   " + C_WARN + "[疑似离线 · --force]" + C_0
+            print("  %2d. %s%s" % (i, item["name"], mark))
             print("      %s%s%s" % (C_DIM, item["path"], C_0))
             print("      最后打开 %s   会话 %d 条（软删 %d / 存活 %d）"
                   % (fmt_time(item["last_opened"]), item["sessions_total"],
                      item["sessions_soft_deleted"], item["sessions_alive"]))
+            if item["state"] == "suspect":
+                print("      " + C_WARN
+                      + (item["state_reason"] or "目录不可达") + C_0)
             if item["sessions_alive"]:
                 print("      " + C_WARN + "含 %d 条存活会话，将保留"
                       % item["sessions_alive"] + C_0)
@@ -1018,8 +1132,11 @@ def cmd_clean(args):
         print("  （无空壳工作空间）")
     hr()
 
-    total_ws_sessions = sum(i["sessions_soft_deleted"] for i in dead)
-    print("\n  workspaces       将删除 %d 条" % len(dead))
+    if suspect and not forced:
+        print_suspect_block(suspect)
+
+    total_ws_sessions = sum(i["sessions_soft_deleted"] for i in targets)
+    print("\n  workspaces       将删除 %d 条" % len(targets))
     print("  sessions         将删除 %d 条（空壳工作空间下已软删除的）" % total_ws_sessions)
     if args.sessions:
         extra = data["total_soft_sessions"] - total_ws_sessions
@@ -1030,7 +1147,7 @@ def cmd_clean(args):
     history_targets = []
     if args.history:
         print("\n  " + C_WARN + "会话历史文件夹：" + C_0)
-        for item in dead:
+        for item in targets:
             cand = project_dir_for(item["path"])
             if os.path.isdir(cand) and safe_under(cand, PROJECTS_DIR):
                 sz = dir_size(cand)
@@ -1066,6 +1183,9 @@ def cmd_clean(args):
         print("  · 本地文件夹不会被删除"
               + ("（--history / --orphans 指定的除外）"
                  if (args.history or args.orphans) else ""))
+        if forced:
+            print("  " + C_ERR + "· 其中 %d 条是疑似离线条目（--force），"
+                  "如果磁盘只是没挂载，清理后条目不会自动回来" % len(forced) + C_0)
         print("  · 数据库会自动备份到 %s" % backup_root())
         print("  · 操作后需重启 WorkBuddy 生效")
         print()
@@ -1092,7 +1212,7 @@ def cmd_clean(args):
     deleted_extra = 0
     try:
         conn.execute("BEGIN")
-        deleted_ws, deleted_sessions, skipped_alive = do_clean(conn, dead)
+        deleted_ws, deleted_sessions, skipped_alive = do_clean(conn, targets)
         if args.sessions:
             cur = conn.execute("DELETE FROM sessions WHERE deleted_at IS NOT NULL")
             deleted_extra = cur.rowcount
@@ -1108,8 +1228,8 @@ def cmd_clean(args):
 
     # 显示名配置
     n_names = 0
-    if dead:
-        n_names = prune_display_names({i["path"] for i in dead})
+    if targets:
+        n_names = prune_display_names({i["path"] for i in targets})
         if n_names:
             print(C_OK + "  显示名配置删除 %d 条" % n_names + C_0)
 
@@ -1162,15 +1282,21 @@ def cmd_clean(args):
     manifest = {
         "cleaned_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "version": VERSION,
+        "build": BUILD,
         "db": args.db,
         "workspaces": [
             {
                 "path": i["path"],
                 "name": i["name"],
+                "state": i["state"],
                 "last_opened_at": i["last_opened"],
                 "sessions_deleted": i["sessions_soft_deleted"],
                 "sessions_kept": i["sessions_alive"],
-            } for i in dead
+            } for i in targets
+        ],
+        "suspect_skipped": [
+            {"path": i["path"], "reason": i["state_reason"]}
+            for i in (suspect if not forced else [])
         ],
         "sessions_deleted": deleted_sessions + deleted_extra,
         "display_names_deleted": n_names,
@@ -1192,9 +1318,13 @@ def cmd_clean(args):
     try:
         remain = conn.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0]
         still_dead = 0
+        still_suspect = 0
         for (p,) in conn.execute("SELECT path FROM workspaces").fetchall():
-            if not os.path.isdir(p):
+            st, _reason = classify_workspace_path(p)
+            if st == "dead":
                 still_dead += 1
+            elif st == "suspect":
+                still_suspect += 1
     finally:
         conn.close()
 
@@ -1202,7 +1332,10 @@ def cmd_clean(args):
     hr("═")
     print(C_B + "  完成" + C_0)
     hr("═")
-    print("  剩余工作空间：%d 条（空壳 %d 条）" % (remain, still_dead))
+    tail = "  剩余工作空间：%d 条（空壳 %d 条" % (remain, still_dead)
+    if still_suspect:
+        tail += "，疑似离线 %d 条" % still_suspect
+    print(tail + "）")
     print("  备份位置：%s" % dest_dir)
     if manifest_path:
         print("  删除清单：%s" % manifest_path)
@@ -1269,6 +1402,7 @@ def build_report(args):
     rep = {
         "tool": "wbclean",
         "version": VERSION,
+        "build": BUILD,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "platform": {
             "system": platform.system(),
@@ -1317,9 +1451,10 @@ def build_report(args):
         data = collect(conn, verify=False)
         dead, alive = data["dead"], data["alive"]
         rep["workspaces"] = {
-            "total": len(dead) + len(alive),
+            "total": len(dead) + len(alive) + len(data["suspect"]),
             "alive": len(alive),
             "dead": len(dead),
+            "suspect": len(data["suspect"]),
         }
         rep["sessions"] = {
             "total": data["total_sessions"],
@@ -1346,6 +1481,10 @@ def build_report(args):
                 "有 %d 条已软删除的会话记录，"
                 "运行 `wbclean clean --sessions` 可清理"
                 % data["total_soft_sessions"])
+        if data["suspect"]:
+            rep["suggestions"].append(
+                "有 %d 条工作空间的目录此刻不可达（可能是磁盘未挂载），"
+                "工具不会清理它们" % len(data["suspect"]))
     finally:
         conn.close()
 
@@ -1382,8 +1521,10 @@ def format_report_text(rep):
     lines.append("")
     lines.append("[工作空间]")
     ws = rep["workspaces"]
-    lines.append("  共 %d 条：正常 %d，空壳 %d"
-                 % (ws["total"], ws["alive"], ws["dead"]))
+    ws_line = "  共 %d 条：正常 %d，空壳 %d" % (ws["total"], ws["alive"], ws["dead"])
+    if ws.get("suspect"):
+        ws_line += "，疑似离线 %d" % ws["suspect"]
+    lines.append(ws_line)
     lines.append("")
     lines.append("[会话]")
     ss = rep["sessions"]
@@ -1501,22 +1642,39 @@ def entry_size(path):
 def purge_dir_contents(path, keep_days=0, by_date=False):
     """清空目录内容，保留目录本身。返回释放字节数。
 
-    by_date=True 时，形如 2026-10-28 的子目录按天数保留。
+    by_date=True（日志目录）时按「含今天的 N 个日历日」保留：
+
+      · 形如 2026-10-28 的子目录按日期判断，keep_days=1 只留今天，
+        =3 留今天与前两天；
+      · 其他条目（sandbox/、daemon.old.log）没有日期可依，按 mtime 判断，
+        同样以「今天零点往前 N-1 天」为界 —— 原来这类条目会被无条件删掉，
+        等于 --keep-days 对当天的沙箱日志完全无效。
     """
     if not os.path.isdir(path):
         return 0
 
-    cutoff = ""
+    cutoff_date = ""
+    cutoff_ts = None
     if by_date and keep_days > 0:
-        cutoff = time.strftime(
-            "%Y-%m-%d", time.localtime(time.time() - keep_days * 86400))
+        now = time.localtime()
+        midnight = time.mktime((now.tm_year, now.tm_mon, now.tm_mday,
+                                0, 0, 0, 0, 0, -1))
+        cutoff_ts = midnight - (keep_days - 1) * 86400
+        cutoff_date = time.strftime("%Y-%m-%d", time.localtime(cutoff_ts))
 
     freed = 0
     for entry in sorted(os.listdir(path)):
         full = os.path.join(path, entry)
-        if by_date and cutoff and re.match(r"^\d{4}-\d{2}-\d{2}$", entry):
-            if entry >= cutoff:          # YYYY-MM-DD 字典序即时间序
-                continue
+        if cutoff_ts is not None:
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", entry):
+                if entry >= cutoff_date:     # YYYY-MM-DD 字典序即时间序
+                    continue
+            else:
+                try:
+                    if os.path.getmtime(full) >= cutoff_ts:
+                        continue
+                except OSError:
+                    continue                 # 读不到 mtime 就不删
         size = entry_size(full)
         try:
             if os.path.isdir(full) and not os.path.islink(full):
@@ -1637,7 +1795,7 @@ def cmd_cache(args):
         print("\n  " + C_DIM + "另有深度项 %s 未计入（加 --deep 一起清）"
               % human_size(deep_total) + C_0)
     if args.keep_days:
-        print("\n  日志保留最近 %d 天" % args.keep_days)
+        print("\n  日志保留最近 %d 天（含今天）" % args.keep_days)
 
     if args.dry_run:
         print("\n" + C_WARN + "[预览模式] 未删除任何内容。" + C_0 + "\n")
@@ -1731,13 +1889,13 @@ def cmd_menu(args):
         "1": (cmd_scan, lambda: SimpleNamespace(db=args.db)),
         "2": (cmd_clean, lambda: SimpleNamespace(
             db=args.db, dry_run=False, yes=False, history=False,
-            sessions=False, orphans=False)),
+            sessions=False, orphans=False, force=False)),
         "3": (cmd_clean, lambda: SimpleNamespace(
             db=args.db, dry_run=False, yes=False, history=True,
-            sessions=False, orphans=False)),
+            sessions=False, orphans=False, force=False)),
         "4": (cmd_clean, lambda: SimpleNamespace(
             db=args.db, dry_run=False, yes=False, history=False,
-            sessions=False, orphans=True)),
+            sessions=False, orphans=True, force=False)),
         "5": (cmd_cache, lambda: SimpleNamespace(
             db=args.db, clean=True, deep=False, keep_days=0,
             dry_run=False, yes=False)),
@@ -1802,8 +1960,11 @@ def build_parser():
         epilog="只读命令（scan/stats/backup/report）不需要退出应用；"
                "写命令（clean/restore）会强制检查。",
     )
-    p.add_argument("--version", action="version", version="wbclean " + VERSION)
-    p.add_argument("--db", default=DB_PATH, help=argparse.SUPPRESS)
+    p.add_argument("--version", action="version",
+                   version="wbclean %s (build %s)" % (VERSION, BUILD))
+    # 默认值必须是 None：只有 None 才能区分「用户显式给了 --db」和「没给」。
+    # 显式 --db 优先于 --app-home 推导出来的路径。
+    p.add_argument("--db", default=None, help=argparse.SUPPRESS)
     p.add_argument("--skip-process-check", action="store_true",
                    help=argparse.SUPPRESS)
     p.add_argument("--app-home", default=os.environ.get("WBCLEAN_APP_HOME"),
@@ -1825,6 +1986,9 @@ def build_parser():
                     help="同时删除空壳项目的会话历史文件夹")
     sp.add_argument("--orphans", action="store_true",
                     help="同时删除不属于任何工作空间的孤儿历史目录")
+    sp.add_argument("--force", action="store_true",
+                    help="连同「疑似离线」的条目一起清理"
+                         "（目录可能只是所在磁盘没挂载，确认删了再用）")
     sp.add_argument("--sessions", action="store_true",
                     help="额外清理所有已软删除的会话记录（含正常项目的）")
     sp.set_defaults(func=cmd_clean)
@@ -1852,7 +2016,7 @@ def build_parser():
     sp.add_argument("--deep", action="store_true",
                     help="连 file-history / changes-detail / artifact-index 一起清")
     sp.add_argument("--keep-days", type=int, default=0, metavar="N",
-                    help="日志保留最近 N 天（默认 0，全部删除）")
+                    help="日志保留最近 N 天，含今天（默认 0，全部删除）")
     sp.add_argument("--dry-run", action="store_true", help="只预览，不删除")
     sp.add_argument("--yes", action="store_true", help="跳过交互确认")
     sp.set_defaults(func=cmd_cache)
@@ -1870,20 +2034,27 @@ def main():
         print()
         return 0
 
-    # 数据目录可覆盖：命令行参数优先，其次环境变量，最后按平台取默认值
+    # 路径优先级：显式 --db > --app-home（含 WBCLEAN_APP_HOME）推导 > 平台默认。
+    # --db 的默认值取 None，正是为了分辨「显式给了」和「没给」——
+    # 原来无条件覆盖，导致 --app-home 和环境变量都会静默吞掉 --db。
     app_home = getattr(args, "app_home", None)
+    explicit_db = getattr(args, "db", None)
     if app_home:
         global APP_HOME, DB_PATH, DISPLAY_NAMES_PATH, PROJECTS_DIR
         APP_HOME = os.path.abspath(os.path.expanduser(app_home))
         DB_PATH = os.path.join(APP_HOME, "workbuddy.db")
         DISPLAY_NAMES_PATH = os.path.join(APP_HOME, "workspace-display-names.json")
         PROJECTS_DIR = os.path.join(APP_HOME, "projects")
-        # --db 的默认值在解析时就固化了，这里必须跟着改，
-        # 否则 --app-home 只影响部分路径，子命令仍会读默认位置的库。
-        args.db = DB_PATH
         # 指错目录的代价是删掉真实数据，所以这里必须留痕迹：走 stderr，
         # 不干扰 report --format json 的 stdout。
         sys.stderr.write("[注意] 使用自定义数据目录：%s\n" % APP_HOME)
+
+    if explicit_db:
+        args.db = os.path.abspath(os.path.expanduser(explicit_db))
+        if app_home and args.db != DB_PATH:
+            sys.stderr.write("[注意] --db 优先于数据目录推导：%s\n" % args.db)
+    else:
+        args.db = DB_PATH
 
     try:
         args.func(args)

@@ -11,8 +11,10 @@ wbclean 单元测试
 测试全程使用临时目录和临时数据库，**不会碰到真实的数据目录**。
 """
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import os
 import shutil
 import sqlite3
@@ -511,6 +513,220 @@ class OrphanProjectTests(unittest.TestCase):
         conn = sqlite3.connect(self.db)
         self.assertEqual(mod.find_orphan_projects(conn), [])
         conn.close()
+
+
+class WorkspaceStateTests(unittest.TestCase):
+    """空壳三态判定 —— 磁盘没挂载不能当成目录被删。
+
+    这是唯一会真删用户数据的分支：把「外置盘拔了」判成「目录删了」，
+    等盘插回来，侧边栏条目已经没了，带 --history 时连会话历史一起没。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.orig_projects = mod.PROJECTS_DIR
+        mod.PROJECTS_DIR = os.path.join(self.tmp, "projects")
+
+    def tearDown(self):
+        mod.PROJECTS_DIR = self.orig_projects
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_existing_dir_is_alive(self):
+        p = os.path.join(self.tmp, "here")
+        os.makedirs(p)
+        self.assertEqual(mod.classify_workspace_path(p), ("alive", ""))
+
+    def test_missing_leaf_with_existing_parent_is_dead(self):
+        p = os.path.join(self.tmp, "gone")
+        self.assertEqual(mod.classify_workspace_path(p)[0], "dead")
+
+    def test_missing_parent_chain_is_suspect(self):
+        p = os.path.join(self.tmp, "unmounted", "proj")
+        state, reason = mod.classify_workspace_path(p)
+        self.assertEqual(state, "suspect")
+        self.assertTrue(reason, "疑似离线必须给出原因")
+
+    def test_unmounted_volume_is_suspect(self):
+        if mod.IS_WIN:
+            self.skipTest("/Volumes 是 macOS 的卷挂载点")
+        state, reason = mod.classify_workspace_path(
+            "/Volumes/NoSuchVolume-wbclean-test/proj")
+        self.assertEqual(state, "suspect")
+        self.assertIn("/Volumes", reason)
+
+    def _db_with(self, paths):
+        db = os.path.join(self.tmp, "t.db")
+        conn = sqlite3.connect(db)
+        conn.executescript(SCHEMA_SQL)
+        for p in paths:
+            conn.execute("INSERT INTO workspaces VALUES (?, ?)", (p, 1))
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_collect_keeps_suspect_out_of_dead(self):
+        alive = os.path.join(self.tmp, "alive")
+        os.makedirs(alive)
+        gone = os.path.join(self.tmp, "gone")
+        unmounted = os.path.join(self.tmp, "unmounted", "proj")
+        db = self._db_with([alive, gone, unmounted])
+
+        conn = sqlite3.connect(db)
+        data = mod.collect(conn, verify=True)
+        conn.close()
+
+        self.assertEqual(len(data["alive"]), 1)
+        self.assertEqual(len(data["dead"]), 1)
+        self.assertEqual(len(data["suspect"]), 1)
+        self.assertEqual(data["suspect"][0]["path"], unmounted)
+        self.assertNotIn(unmounted, [i["path"] for i in data["dead"]])
+
+    def _clean_args(self, db, force=False):
+        from types import SimpleNamespace
+        return SimpleNamespace(db=db, dry_run=True, yes=True, history=True,
+                               sessions=False, orphans=False, force=force)
+
+    def test_dry_run_reports_suspect_without_counting_it(self):
+        gone = os.path.join(self.tmp, "gone")
+        unmounted = os.path.join(self.tmp, "unmounted", "proj")
+        db = self._db_with([gone, unmounted])
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            mod.cmd_clean(self._clean_args(db))
+        out = buf.getvalue()
+
+        self.assertIn("疑似离线", out)
+        self.assertIn("将删除 1 条", out, "只该把确定已删除的那条算进清理目标")
+
+    def test_force_includes_suspect(self):
+        gone = os.path.join(self.tmp, "gone")
+        unmounted = os.path.join(self.tmp, "unmounted", "proj")
+        db = self._db_with([gone, unmounted])
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            mod.cmd_clean(self._clean_args(db, force=True))
+        out = buf.getvalue()
+
+        self.assertIn("[疑似离线 · --force]", out)
+        self.assertIn("将删除 2 条", out)
+
+
+class KeepDaysSemanticsTests(unittest.TestCase):
+    """--keep-days 的承诺是「保留最近 N 天，含今天」。
+
+    两个坑：cutoff 按 now-N*86400 取日期，实际保留 N+1 天；
+    非日期条目（sandbox/、*.old.log）压根不看 keep_days，无条件删。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.logs = os.path.join(self.tmp, "logs")
+        os.makedirs(self.logs)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _day(self, offset):
+        name = time.strftime("%Y-%m-%d",
+                             time.localtime(time.time() - offset * 86400))
+        d = os.path.join(self.logs, name)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "x.log"), "w") as f:
+            f.write("x" * 100)
+        return name
+
+    def test_keep_one_day_means_today_only(self):
+        today, yesterday = self._day(0), self._day(1)
+        mod.purge_dir_contents(self.logs, keep_days=1, by_date=True)
+        left = set(os.listdir(self.logs))
+        self.assertIn(today, left)
+        self.assertNotIn(yesterday, left, "keep-days=1 不该留下昨天的日志")
+
+    def test_keep_three_days_is_today_plus_two(self):
+        d0, d1, d2, d3 = (self._day(0), self._day(1),
+                          self._day(2), self._day(3))
+        mod.purge_dir_contents(self.logs, keep_days=3, by_date=True)
+        left = set(os.listdir(self.logs))
+        for keep in (d0, d1, d2):
+            self.assertIn(keep, left)
+        self.assertNotIn(d3, left)
+
+    def test_non_date_entries_follow_mtime(self):
+        fresh = os.path.join(self.logs, "sandbox")
+        os.makedirs(fresh)
+        old = os.path.join(self.logs, "daemon.old.log")
+        with open(old, "w") as f:
+            f.write("z" * 10)
+        now = time.time()
+        os.utime(fresh, (now, now))
+        os.utime(old, (now - 5 * 86400, now - 5 * 86400))
+
+        mod.purge_dir_contents(self.logs, keep_days=1, by_date=True)
+        left = set(os.listdir(self.logs))
+        self.assertIn("sandbox", left, "当天还在写的沙箱日志不能删")
+        self.assertNotIn("daemon.old.log", left)
+
+    def test_zero_keep_days_removes_everything(self):
+        self._day(0)
+        os.makedirs(os.path.join(self.logs, "sandbox"))
+        mod.purge_dir_contents(self.logs, keep_days=0, by_date=True)
+        self.assertEqual(os.listdir(self.logs), [])
+
+
+class DbPrecedenceTests(unittest.TestCase):
+    """--db 与 --app-home 的优先级：显式 --db 必须赢。
+
+    原来 main() 只要发现 app_home 就无条件 args.db = DB_PATH，
+    而 app_home 的默认值又来自 WBCLEAN_APP_HOME 环境变量 ——
+    等于环境里设了这个变量，--db 就被静默吞掉。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.home_a = os.path.join(self.tmp, "a")
+        self.home_b = os.path.join(self.tmp, "b")
+        os.makedirs(self.home_a)
+        os.makedirs(self.home_b)
+        self._make_db(os.path.join(self.home_a, "workbuddy.db"), 1)
+        self._make_db(os.path.join(self.home_b, "workbuddy.db"), 3)
+        self.saved = (mod.APP_HOME, mod.DB_PATH, mod.DISPLAY_NAMES_PATH,
+                      mod.PROJECTS_DIR, sys.argv)
+
+    def tearDown(self):
+        (mod.APP_HOME, mod.DB_PATH, mod.DISPLAY_NAMES_PATH,
+         mod.PROJECTS_DIR, sys.argv) = self.saved
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_db(self, path, n):
+        conn = sqlite3.connect(path)
+        conn.executescript(SCHEMA_SQL)
+        for i in range(n):
+            p = os.path.join(self.tmp, "ws-%s-%d"
+                             % (os.path.basename(os.path.dirname(path)), i))
+            os.makedirs(p, exist_ok=True)
+            conn.execute("INSERT INTO workspaces VALUES (?, ?)", (p, 1))
+        conn.commit()
+        conn.close()
+
+    def _run(self, argv):
+        buf = io.StringIO()
+        sys.argv = ["wbclean"] + argv
+        with contextlib.redirect_stdout(buf):
+            mod.main()
+        return buf.getvalue()
+
+    def test_explicit_db_beats_app_home(self):
+        out = self._run(["--app-home", self.home_a,
+                         "--db", os.path.join(self.home_b, "workbuddy.db"),
+                         "scan"])
+        self.assertIn("工作空间记录 3 条", out,
+                      "显式 --db 指向的库有 3 条，读到 1 条说明被覆盖了")
+
+    def test_app_home_used_when_db_absent(self):
+        out = self._run(["--app-home", self.home_b, "scan"])
+        self.assertIn("工作空间记录 3 条", out)
 
 
 if __name__ == "__main__":
