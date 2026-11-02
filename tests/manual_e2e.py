@@ -17,6 +17,7 @@
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -73,10 +74,24 @@ def run(args, expect_rc=0, extra_prefix=(), use_home=True):
     return p
 
 
-def touch(path, size=1024):
+def touch(path, size=1024, age_days=0):
+    """造文件。age_days 用来把 mtime 往前拨，测按时间保留的判定。"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
         f.write(b"x" * size)
+    if age_days:
+        ts = time.time() - age_days * 86400
+        os.utime(path, (ts, ts))
+
+
+def day(offset=0):
+    """今天往前 offset 个日历日的 YYYY-MM-DD。
+
+    日期目录名必须按运行当天生成 —— 写死日期会让脚本过几天自己失败，
+    而且测不到「含今天」这条新语义。
+    """
+    return time.strftime("%Y-%m-%d",
+                         time.localtime(time.time() - offset * 86400))
 
 
 def db_rows():
@@ -146,9 +161,9 @@ for name, size in ((K_KEEP, 4096), (K_G1, 8192), (K_G3, 5120),
     touch(os.path.join(P, name, "history", "s1.jsonl"), size)
 
 FILES = {
-    "logs/2026-10-30/app.log": 4000,
-    "logs/2026-10-31/app.log": 4000,
-    "logs/2026-11-01/app.log": 4000,
+    "logs/%s/app.log" % day(2): 4000,
+    "logs/%s/app.log" % day(1): 4000,
+    "logs/%s/app.log" % day(0): 4000,
     "logs/sandbox/sandbox.log": 3000,
     "cache/state.json": 1500,
     "app/cache/chunk.bin": 2500,
@@ -268,7 +283,7 @@ p = run(["cache"])
 check("cache 只读列出日志", "logs" in p.stdout)
 check("cache 只读提到 blobs 受保护", "blobs" in p.stdout)
 check("cache 只读不改文件",
-      os.path.exists(os.path.join(HOME, "logs", "2026-11-01", "app.log")))
+      os.path.exists(os.path.join(HOME, "logs", day(0), "app.log")))
 
 print("\n============================================================")
 print(" 第 2 轮：clean --dry-run（必须零写入）")
@@ -285,7 +300,7 @@ check("dry-run 列出孤儿目录", "孤儿历史目录：" in out)
 eq("dry-run 后 workspaces 未变", db_rows()[0], ws0)
 eq("dry-run 后 sessions 未变", db_rows()[1], sess0)
 eq("dry-run 后 projects 未变", lsdir(P), INIT_PROJECTS)
-check("dry-run 后 logs 未变", os.path.exists(os.path.join(HOME, "logs", "2026-11-01")))
+check("dry-run 后 logs 未变", os.path.exists(os.path.join(HOME, "logs", day(0))))
 check("dry-run 不产生备份", lsdir(BACKUP_DIR) == [], str(lsdir(BACKUP_DIR)))
 
 print("\n============================================================")
@@ -417,14 +432,33 @@ check("--deep 后 changes-detail 清空", not lsdir(os.path.join(HOME, "changes-
 check("--deep 后 artifact-index 清空", not lsdir(os.path.join(HOME, "artifact-index")))
 check("--deep 后仍不动 blobs", os.path.exists(os.path.join(HOME, "blobs", "keep.png")))
 
-for d in ("2026-10-28", "2026-10-29", "2026-10-30", "2026-10-31"):
+# keep-days N = 保留「含今天」的 N 个日历日。
+# 四条日期目录全按运行当天现算，写死日期过几天就会自己失败。
+dates = [day(i) for i in range(4)]          # 今天 / 昨天 / 前天 / 大前天
+for d in dates:
     touch(os.path.join(HOME, "logs", d, "app.log"), 100)
-run(["cache", "--clean", "--yes", "--keep-days", "2"], extra_prefix=("--skip-process-check",))
-kept = lsdir(os.path.join(HOME, "logs"))
-check("keep-days 2 保留 cutoff 之后两天",
-      kept == ["2026-10-30", "2026-10-31"], str(kept))
-check("keep-days 删掉更早的",
-      not os.path.exists(os.path.join(HOME, "logs", "2026-10-28")))
+# 非日期条目按各自 mtime 判断（目录看目录本身，不看里面的文件）
+touch(os.path.join(HOME, "logs", "sandbox", "old.log"), 100, age_days=10)
+touch(os.path.join(HOME, "logs", "sandbox-fresh", "sandbox.log"), 100, age_days=0)
+touch(os.path.join(HOME, "logs", "daemon.old.log"), 100, age_days=10)
+touch(os.path.join(HOME, "logs", "daemon.new.log"), 100, age_days=0)
+OLD_TS = time.time() - 10 * 86400
+os.utime(os.path.join(HOME, "logs", "sandbox"), (OLD_TS, OLD_TS))
+run(["cache", "--clean", "--yes", "--keep-days", "2"],
+    extra_prefix=("--skip-process-check",))
+kept = [d for d in lsdir(os.path.join(HOME, "logs"))
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", d)]
+check("keep-days 2 保留今天与昨天（含今天）",
+      kept == sorted(dates[:2]), "留下 %s，期望 %s" % (kept, sorted(dates[:2])))
+check("keep-days 删掉前天及更早",
+      not os.path.exists(os.path.join(HOME, "logs", dates[2]))
+      and not os.path.exists(os.path.join(HOME, "logs", dates[3])))
+check("keep-days 按 mtime 删掉老的目录与文件",
+      not os.path.exists(os.path.join(HOME, "logs", "sandbox"))
+      and not os.path.exists(os.path.join(HOME, "logs", "daemon.old.log")))
+check("keep-days 按 mtime 留住新的目录与文件",
+      os.path.exists(os.path.join(HOME, "logs", "sandbox-fresh", "sandbox.log"))
+      and os.path.exists(os.path.join(HOME, "logs", "daemon.new.log")))
 
 print("\n============================================================")
 print(" 第 7 轮：畸形环境（缺库 / 坏库 / 缺表 / 空目录）")
@@ -497,7 +531,134 @@ p = run(["clean", "--yes", "--dry-run"], extra_prefix=("--skip-process-check",))
 check("--dry-run 与 --yes 同用不报错", p.returncode == 0)
 
 print("\n============================================================")
-print(" 第 9 轮：真实数据目录零触碰校验")
+print(" 第 9 轮：三态判定（空壳 / 疑似离线）与 --force")
+print("============================================================")
+
+# 这一轮用独立的数据目录，不干扰前面的库
+TRI = os.path.join(ROOT, "tri")
+TRI_DB = os.path.join(TRI, "workbuddy.db")
+TRI_P = os.path.join(TRI, "projects")
+TRI_ALIVE = os.path.join(TRI, "ws_alive")
+TRI_DEAD = os.path.join(TRI, "ws_dead")                # 父目录在、自己不在
+TRI_DEEP = os.path.join(TRI, "deep", "missing", "ws")  # 上级目录也不存在
+TRI_OFFLINE = "Z:\\wbclean_no_such_volume\\ws"         # 盘符未连接
+
+os.makedirs(TRI_ALIVE)          # 注意：TRI 存在，TRI_DEAD / TRI_DEEP 都不建
+
+# Z: 万一真被占用了就跳过盘符那条，免得测试机不同导致假失败
+use_offline_drive = not os.path.exists("Z:\\")
+ws_list = [TRI_ALIVE, TRI_DEAD, TRI_DEEP] + ([TRI_OFFLINE] if use_offline_drive else [])
+n_suspect = 2 if use_offline_drive else 1
+
+for w in ws_list:
+    touch(os.path.join(TRI_P, key(w), "history", "s1.jsonl"), 512)
+
+c = sqlite3.connect(TRI_DB)
+c.executescript("""
+CREATE TABLE workspaces (path TEXT PRIMARY KEY, last_opened_at INTEGER);
+CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, status TEXT, deleted_at INTEGER);
+""")
+now_ms = int(time.time() * 1000)
+c.executemany("INSERT INTO workspaces VALUES (?,?)",
+              [(w, now_ms) for w in ws_list])
+c.executemany("INSERT INTO sessions VALUES (?,?,?,?)",
+              [("t%d" % i, w, "done", now_ms) for i, w in enumerate(ws_list)])
+c.commit()
+c.close()
+
+def tri_rows():
+    cc = sqlite3.connect(TRI_DB)
+    try:
+        return sorted(r[0] for r in cc.execute("SELECT path FROM workspaces"))
+    finally:
+        cc.close()
+
+p = run(["--app-home", TRI, "scan"], use_home=False)
+out = p.stdout
+check("scan 把「父目录在、自己不在」判成空壳", "目录已消失 1" in out, out[:900])
+check("scan 单独统计疑似离线", "疑似离线 %d" % n_suspect in out, out[:900])
+check("scan 说明盘符未连接", ("磁盘未连接" in out) if use_offline_drive else True,
+      out[:1500])
+check("scan 说明上级目录也不存在", "上级目录也不存在" in out, out[:1500])
+
+p = run(["--app-home", TRI, "clean", "--dry-run"], use_home=False)
+check("dry-run 只把空壳算进待删", "将删除 1 条" in p.stdout, p.stdout[:1500])
+check("dry-run 提示疑似离线未处理", "疑似离线，未做处理" in p.stdout, p.stdout[:2000])
+check("dry-run 提示 --force", "--force" in p.stdout, p.stdout[:2000])
+check("dry-run 不写入", len(tri_rows()) == len(ws_list))
+
+p = run(["--app-home", TRI, "clean", "--yes", "--history"], use_home=False,
+        extra_prefix=("--skip-process-check",))
+rows = tri_rows()
+eq("clean 默认不碰疑似离线", len(rows), 1 + n_suspect)
+check("疑似离线条目仍在库里", TRI_DEEP in rows, str(rows))
+if use_offline_drive:
+    check("盘符未连接条目仍在库里", TRI_OFFLINE in rows, str(rows))
+check("空壳的历史目录已删", not os.path.isdir(os.path.join(TRI_P, key(TRI_DEAD))))
+check("疑似离线的历史目录保留",
+      os.path.isdir(os.path.join(TRI_P, key(TRI_DEEP))), lsdir(TRI_P))
+if use_offline_drive:
+    check("盘符未连接的条目历史也保留",
+          os.path.isdir(os.path.join(TRI_P, key(TRI_OFFLINE))), lsdir(TRI_P))
+
+tri_backups = lsdir(os.path.join(ROOT, "WorkBuddy清理备份"))
+tri_man = None
+for b in tri_backups:
+    mp = os.path.join(ROOT, "WorkBuddy清理备份", b, "deleted.json")
+    if os.path.exists(mp):
+        with open(mp, encoding="utf-8") as f:
+            cand = json.load(f)
+        if cand.get("db", "").startswith(TRI):
+            tri_man = cand
+if tri_man:
+    eq("清单记下跳过 %d 条疑似离线" % n_suspect,
+       len(tri_man.get("suspect_skipped", [])), n_suspect)
+    check("清单里空壳标 state=dead",
+          all(w["state"] == "dead" for w in tri_man["workspaces"]),
+          str(tri_man["workspaces"]))
+else:
+    check("找到本轮 clean 的删除清单", False, str(tri_backups))
+
+p = run(["--app-home", TRI, "clean", "--yes", "--force"], use_home=False,
+        extra_prefix=("--skip-process-check",))
+rows = tri_rows()
+eq("--force 后疑似离线条目清掉", rows, [TRI_ALIVE])
+
+print("\n============================================================")
+print(" 第 10 轮：--db 与 --app-home 的优先级")
+print("============================================================")
+
+# 显式 --db 必须压过 --app-home 推导出来的路径
+DB_ALT = os.path.join(ROOT, "alt", "alternate.db")
+os.makedirs(os.path.dirname(DB_ALT))
+shutil.copyfile(DB, DB_ALT)
+
+p = run(["--app-home", HOME, "--db", DB_ALT, "report", "--format", "json"],
+        use_home=False)
+try:
+    r3 = json.loads(p.stdout)
+    eq("--db 优先于 --app-home", os.path.normcase(r3["app"]["db_path"]),
+       os.path.normcase(DB_ALT))
+    check("同时给出时 stderr 提示以 --db 为准", "--db 优先" in p.stderr, p.stderr[:300])
+except Exception as e:
+    check("--db + --app-home 仍输出合法 JSON", False, "%s\n%s" % (e, p.stdout[:400]))
+
+env2 = os.environ.copy()
+env2["PYTHONIOENCODING"] = "utf-8"
+env2["LOCALAPPDATA"] = LOCAL
+env2["WBCLEAN_APP_HOME"] = HOME
+p2 = subprocess.run([PY, SCRIPT, "--db", DB_ALT, "report", "--format", "json"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", env=env2)
+try:
+    r4 = json.loads(p2.stdout)
+    eq("--db 也优先于 WBCLEAN_APP_HOME", os.path.normcase(r4["app"]["db_path"]),
+       os.path.normcase(DB_ALT))
+except Exception as e:
+    check("环境变量 + --db 仍输出合法 JSON", False, "%s\n%s" % (e, p2.stdout[:400]))
+
+print("\n============================================================")
+print(" 第 11 轮：真实数据目录零触碰校验")
 print("============================================================")
 
 REAL_AFTER = real_fingerprint()
