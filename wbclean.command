@@ -17,7 +17,7 @@ else
     echo "  [错误] 找不到 wbclean。"
     echo "  先运行 ./install.sh 安装，或直接执行 ./bin/wbclean menu"
     echo ""
-    read -r -n 1 -s -p "  按任意键关闭..."
+    read -r -n 1 -s -p "  按任意键结束..."
     exit 1
 fi
 
@@ -55,10 +55,10 @@ menu_rc=$?
 echo ""
 
 if [ "$launched_by_window" = "1" ]; then
-    read -r -n 1 -s -p "  按任意键关闭窗口..."
+    # 尝试关窗口：若用户授予了终端自动化权限则成功，否则窗口留着
+    #（shellExitAction 配置决定）。提示语不承诺结果。
+    read -r -n 1 -s -p "  按任意键结束..."
     echo ""
-    # 尝试主动关窗口。终端若未授予自动化权限会失败（macOS 报 -10004），
-    # 这里静默忽略 —— 窗口去留最终由终端的偏好设置决定。
     osascript -e 'tell application "Terminal" to close front window' >/dev/null 2>&1
 fi
 
