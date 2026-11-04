@@ -621,6 +621,22 @@ def _nearest_existing_ancestor(path):
     return None
 
 
+def has_visible_content(path):
+    """目录顶层是否有「非隐藏」的实际内容。
+
+    只有 . 开头的项（.workbuddy-ai、.memory、.DS_Store 之类）不算 ——
+    那些是 WorkBuddy 自己生成的元数据，开了会话但没放进任何文件的工作空间
+    顶层就只有这些。访问失败时按「有内容」处理，宁可保守。
+    """
+    try:
+        for entry in os.listdir(path):
+            if not entry.startswith("."):
+                return True
+        return False
+    except OSError:
+        return True
+
+
 def classify_workspace_path(path):
     """把「目录在不在」拆成三态，返回 (state, reason)。
 
@@ -682,7 +698,7 @@ def collect(conn, verify=True):
 
     idx = index_sessions(conn)
 
-    dead, alive, suspect = [], [], []
+    dead, alive, suspect, meta_only = [], [], [], []
     for path, last_opened in rows:
         rec = idx.get(norm_path(path)) or {"total": 0, "soft": 0, "soft_ids": []}
         name = os.path.basename(path.rstrip("\\/")) or path
@@ -700,7 +716,14 @@ def collect(conn, verify=True):
             "state_reason": reason,
         }
         if state == "alive":
-            alive.append(item)
+            if has_visible_content(path):
+                alive.append(item)
+            else:
+                # 目录在，但顶层只有 WorkBuddy 生成的元数据（.workbuddy-ai 等）
+                # —— 开过会话但没放进任何文件，用户视角就是空壳。
+                item["state"] = "metadata_only"
+                item["state_reason"] = "顶层只有隐藏元数据（.workbuddy-ai 等）"
+                meta_only.append(item)
         elif state == "dead":
             dead.append(item)
         else:
@@ -716,6 +739,7 @@ def collect(conn, verify=True):
         "dead": dead,
         "alive": alive,
         "suspect": suspect,
+        "metadata_only": meta_only,
         "total_soft_sessions": total_soft,
         "total_sessions": total_sessions,
     }
@@ -782,6 +806,7 @@ def cmd_scan(args):
         conn.close()
 
     dead, alive, suspect = data["dead"], data["alive"], data["suspect"]
+    meta_only = data.get("metadata_only", [])
 
     print()
     hr("═")
@@ -789,7 +814,10 @@ def cmd_scan(args):
     hr("═")
 
     summary = "  工作空间记录 %d 条：目录正常 %d，目录已消失 %d" % (
-        len(dead) + len(alive) + len(suspect), len(alive), len(dead))
+        len(dead) + len(alive) + len(suspect) + len(meta_only),
+        len(alive), len(dead))
+    if meta_only:
+        summary += "，仅元数据 %d" % len(meta_only)
     if suspect:
         summary += "，疑似离线 %d" % len(suspect)
     print(summary)
@@ -808,8 +836,24 @@ def cmd_scan(args):
         hr()
         print("\n  清理方法：" + C_B + "wbclean clean" + C_0
               + "（需先退出 WorkBuddy）")
-    elif not suspect:
+    elif not suspect and not meta_only:
         print("\n  " + C_OK + "没有空壳条目，列表是干净的。" + C_0)
+
+    if meta_only:
+        print("\n  " + C_WARN
+              + "仅元数据条目（顶层只有隐藏元数据，无实际文件）" + C_0)
+        hr()
+        for i, item in enumerate(meta_only, 1):
+            print("  %2d. %s" % (i, item["name"]))
+            print("      %s%s%s" % (C_DIM, item["path"], C_0))
+            print("      最后打开 %s   会话 %d 条（软删 %d / 存活 %d）"
+                  % (fmt_time(item["last_opened"]), item["sessions_total"],
+                     item["sessions_soft_deleted"], item["sessions_alive"]))
+        hr()
+        print("\n  这些目录里只有 WorkBuddy 生成的元数据（.workbuddy-ai 等），")
+        print("  没有你的实际文件。清理会连目录和其中的记忆日志一起删除。")
+        print("  清理方法：" + C_B + "wbclean clean --metadata-only" + C_0
+              + "（需先退出 WorkBuddy）")
 
     print_suspect_block(suspect)
 
@@ -1088,13 +1132,16 @@ def cmd_clean(args):
         conn.close()
 
     dead, alive, suspect = data["dead"], data["alive"], data["suspect"]
+    meta_only = data.get("metadata_only", [])
     # 疑似离线的条目默认一条都不动；只有显式 --force 才进清理目标
     forced = list(suspect) if getattr(args, "force", False) else []
-    targets = dead + forced
+    # 仅元数据的条目默认也不动；显式 --metadata-only 才进清理目标
+    meta_targets = list(meta_only) if getattr(args, "metadata_only", False) else []
+    targets = dead + forced + meta_targets
     dead_orphans = [o for o in orphans if o["deletable"]]
-    print("  工作空间 %d 条：正常 %d，空壳 %d，疑似离线 %d"
-          % (len(dead) + len(alive) + len(suspect), len(alive), len(dead),
-             len(suspect)))
+    print("  工作空间 %d 条：正常 %d，空壳 %d，仅元数据 %d，疑似离线 %d"
+          % (len(dead) + len(alive) + len(suspect) + len(meta_only),
+             len(alive), len(dead), len(meta_only), len(suspect)))
     if args.orphans:
         print("  孤儿历史目录 %d 个，共 %s"
               % (len(dead_orphans),
@@ -1104,6 +1151,17 @@ def cmd_clean(args):
             and not dead_orphans:
         if suspect:
             print_suspect_block(suspect)
+            print()
+            return
+        if meta_only:
+            print("\n  " + C_WARN + "发现 %d 个「仅元数据」工作空间"
+                  % len(meta_only) + C_0)
+            for item in meta_only:
+                print("    · %s  %s%s%s" % (item["name"], C_DIM,
+                                            item["path"], C_0))
+            print("  顶层没有任何实际文件，只有 .workbuddy-ai 等隐藏元数据。")
+            print("  要清理它们：" + C_B + "wbclean clean --metadata-only" + C_0)
+            print("  （会连本地目录和其中的记忆日志一起删除）")
             print()
             return
         print("\n  " + C_OK + "没有需要清理的内容。" + C_0 + "\n")
@@ -1117,6 +1175,8 @@ def cmd_clean(args):
             mark = ""
             if item["state"] == "suspect":
                 mark = "   " + C_WARN + "[疑似离线 · --force]" + C_0
+            elif item["state"] == "metadata_only":
+                mark = "   " + C_WARN + "[仅元数据 · 将删目录]" + C_0
             print("  %2d. %s%s" % (i, item["name"], mark))
             print("      %s%s%s" % (C_DIM, item["path"], C_0))
             print("      最后打开 %s   会话 %d 条（软删 %d / 存活 %d）"
@@ -1125,6 +1185,13 @@ def cmd_clean(args):
             if item["state"] == "suspect":
                 print("      " + C_WARN
                       + (item["state_reason"] or "目录不可达") + C_0)
+            elif item["state"] == "metadata_only":
+                mem = os.path.join(item["path"], ".workbuddy-ai", "memory")
+                n = sum(len(fs) for _r, _d, fs in os.walk(mem)) \
+                    if os.path.isdir(mem) else 0
+                print("      " + C_WARN
+                      + "顶层只有隐藏元数据；删除目录将一并移除 %d 个记忆文件"
+                      % n + C_0)
             if item["sessions_alive"]:
                 print("      " + C_WARN + "含 %d 条存活会话，将保留"
                       % item["sessions_alive"] + C_0)
@@ -1183,6 +1250,10 @@ def cmd_clean(args):
         print("  · 本地文件夹不会被删除"
               + ("（--history / --orphans 指定的除外）"
                  if (args.history or args.orphans) else ""))
+        if meta_targets:
+            print("  " + C_ERR + "· 其中 %d 个「仅元数据」条目会连本地目录一起删除"
+                  % len(meta_targets) + C_0)
+            print("    （目录里只有 WorkBuddy 生成的记忆日志，没有你的文件）")
         if forced:
             print("  " + C_ERR + "· 其中 %d 条是疑似离线条目（--force），"
                   "如果磁盘只是没挂载，清理后条目不会自动回来" % len(forced) + C_0)
@@ -1225,6 +1296,28 @@ def cmd_clean(args):
 
     print(C_OK + "  workspaces 删除 %d 条" % deleted_ws + C_0)
     print(C_OK + "  sessions  删除 %d 条" % (deleted_sessions + deleted_extra) + C_0)
+
+    # 仅元数据条目：连本地目录一起删。
+    # 删之前重新检查 —— 确认到执行之间用户可能往里放了实际文件，
+    # 一旦发现可见内容就跳过，宁可留一个孤儿目录也不能删用户文件。
+    if meta_targets:
+        removed_dirs = 0
+        print()
+        for item in meta_targets:
+            p = item["path"]
+            if not os.path.isdir(p):
+                continue
+            if has_visible_content(p):
+                print("  " + C_WARN + "跳过（发现实际文件，未删目录）：%s" % p + C_0)
+                continue
+            try:
+                shutil.rmtree(p)
+                removed_dirs += 1
+                print(C_OK + "  已删除目录 %s" % p + C_0)
+            except OSError as e:
+                print("  " + C_WARN + "删除失败 %s: %s" % (p, e) + C_0)
+        if removed_dirs:
+            print(C_OK + "  共删除 %d 个本地目录" % removed_dirs + C_0)
 
     # 显示名配置
     n_names = 0
@@ -1989,6 +2082,9 @@ def build_parser():
     sp.add_argument("--force", action="store_true",
                     help="连同「疑似离线」的条目一起清理"
                          "（目录可能只是所在磁盘没挂载，确认删了再用）")
+    sp.add_argument("--metadata-only", action="store_true",
+                    help="连同「仅元数据」的条目一起清理（顶层只有 .workbuddy-ai"
+                         " 等隐藏元数据，无实际文件；本地目录将一并删除）")
     sp.add_argument("--sessions", action="store_true",
                     help="额外清理所有已软删除的会话记录（含正常项目的）")
     sp.set_defaults(func=cmd_clean)

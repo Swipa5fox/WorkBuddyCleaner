@@ -119,6 +119,9 @@ class CollectTests(unittest.TestCase):
         self.db = os.path.join(self.tmp, "t.db")
         self.alive_dir = os.path.join(self.tmp, "alive")
         os.makedirs(self.alive_dir)
+        # 空目录在 v1.4 起归类为「仅元数据」；要留在 alive 必须有可见文件
+        with open(os.path.join(self.alive_dir, "work.txt"), "w") as f:
+            f.write("x")
         self.dead_path = os.path.join(self.tmp, "gone")
 
         conn = sqlite3.connect(self.db)
@@ -567,6 +570,9 @@ class WorkspaceStateTests(unittest.TestCase):
     def test_collect_keeps_suspect_out_of_dead(self):
         alive = os.path.join(self.tmp, "alive")
         os.makedirs(alive)
+        # 空目录自 v1.4 起归「仅元数据」，这里要的是 alive，放个可见文件
+        with open(os.path.join(alive, "work.txt"), "w") as f:
+            f.write("x")
         gone = os.path.join(self.tmp, "gone")
         unmounted = os.path.join(self.tmp, "unmounted", "proj")
         db = self._db_with([alive, gone, unmounted])
@@ -727,6 +733,79 @@ class DbPrecedenceTests(unittest.TestCase):
     def test_app_home_used_when_db_absent(self):
         out = self._run(["--app-home", self.home_b, "scan"])
         self.assertIn("工作空间记录 3 条", out)
+
+
+class MetadataOnlyTests(unittest.TestCase):
+    """「仅元数据」判定 —— 顶层只有隐藏元数据的目录也算实质空壳。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _mk(self, rel, content=None):
+        full = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(full) or self.tmp, exist_ok=True)
+        if content is None:
+            os.makedirs(full, exist_ok=True)
+        else:
+            with open(full, "w") as f:
+                f.write(content)
+        return full
+
+    def test_empty_dir_has_no_visible_content(self):
+        d = self._mk("empty")
+        self.assertFalse(mod.has_visible_content(d))
+
+    def test_only_hidden_entries(self):
+        self._mk("m/.workbuddy-ai/memory/x.md", "log")
+        self._mk("m/.DS_Store", "")
+        self.assertFalse(mod.has_visible_content(os.path.join(self.tmp, "m")))
+
+    def test_visible_file_counts(self):
+        d = self._mk("w/code.py", "print(1)")
+        self.assertTrue(mod.has_visible_content(d))
+
+    def test_hidden_plus_visible_counts(self):
+        d = self._mk("w2/.workbuddy-ai/memory/x.md", "log")
+        self._mk("w2/note.txt", "hello")
+        self.assertTrue(mod.has_visible_content(d))
+
+    def test_missing_dir_treated_as_having_content(self):
+        """访问不了按「有内容」处理 —— 宁可保守。"""
+        self.assertTrue(mod.has_visible_content(os.path.join(self.tmp, "nope")))
+
+    def test_collect_classifies_metadata_only(self):
+        self._mk("ws/.workbuddy-ai/memory/x.md", "log")
+        d = os.path.join(self.tmp, "ws")   # 工作空间目录，不是里面的文件
+        db = os.path.join(self.tmp, "t.db")
+        conn = sqlite3.connect(db)
+        conn.executescript(SCHEMA_SQL)
+        conn.execute("INSERT INTO workspaces VALUES (?, ?)", (d, 1))
+        conn.commit()
+
+        data = mod.collect(conn, verify=True)
+        conn.close()
+        self.assertEqual(len(data["metadata_only"]), 1)
+        self.assertEqual(data["metadata_only"][0]["path"], d)
+        self.assertEqual(len(data["alive"]), 0)
+        self.assertEqual(data["metadata_only"][0]["state"], "metadata_only")
+
+    def test_collect_alive_with_real_file(self):
+        self._mk("ws/.workbuddy-ai/memory/x.md", "log")
+        self._mk("ws/note.txt", "hello")
+        d = os.path.join(self.tmp, "ws")   # 工作空间目录，不是里面的文件
+        db = os.path.join(self.tmp, "t.db")
+        conn = sqlite3.connect(db)
+        conn.executescript(SCHEMA_SQL)
+        conn.execute("INSERT INTO workspaces VALUES (?, ?)", (d, 1))
+        conn.commit()
+
+        data = mod.collect(conn, verify=True)
+        conn.close()
+        self.assertEqual(len(data["alive"]), 1)
+        self.assertEqual(len(data["metadata_only"]), 0)
 
 
 if __name__ == "__main__":
