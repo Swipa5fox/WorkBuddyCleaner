@@ -397,6 +397,10 @@ class SameDirTwoSpellingsTests(unittest.TestCase):
         self.db = os.path.join(self.tmp, "t.db")
         self.ws = os.path.join(self.tmp, "ws")
         os.makedirs(self.ws)
+        # 空目录自 v1.4 起归「仅元数据」，本类要测的是 alive 分支，
+        # 放个可见文件让它落在 alive 里
+        with open(os.path.join(self.ws, "work.txt"), "w") as f:
+            f.write("x")
         self.ws_fwd = self.ws.replace("\\", "/")
 
         conn = sqlite3.connect(self.db)
