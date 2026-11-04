@@ -58,10 +58,10 @@ import unicodedata
 import urllib.parse
 from types import SimpleNamespace
 
-VERSION = "1.3"
+VERSION = "1.4"
 # 同一个版本号可能被重新构建过（修 bug 但不改对外版本），
 # 带上构建日期，用户反馈问题时才能分清跑的是哪一版。
-BUILD = "2026-11-02"
+BUILD = "2026-11-04"
 
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
