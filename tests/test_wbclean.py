@@ -808,5 +808,110 @@ class MetadataOnlyTests(unittest.TestCase):
         self.assertEqual(len(data["metadata_only"]), 0)
 
 
+class WindowsCompatTests(unittest.TestCase):
+    """Windows 特有行为 —— 隐藏属性、元数据目录名、只读文件删除。
+
+    这些用例在 macOS 上跑时通过 monkeypatch 模拟 Windows 语义，
+    保证跨平台改动不会只在开发机上正确。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.orig_win = mod.IS_WIN
+
+    def tearDown(self):
+        mod.IS_WIN = self.orig_win
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_dot_prefix_is_hidden_on_both_platforms(self):
+        for is_win in (False, True):
+            mod.IS_WIN = is_win
+            self.assertTrue(mod._is_hidden_entry(".workbuddy-ai", None))
+            self.assertTrue(mod._is_hidden_entry(".DS_Store", None))
+
+    def test_windows_hidden_attribute_counts(self):
+        """Windows 上隐藏是属性不是命名 —— 不带点的隐藏目录也要认。"""
+        class FakeStat:
+            st_file_attributes = 0x2          # FILE_ATTRIBUTE_HIDDEN
+        real_stat = os.stat
+        mod.IS_WIN = True
+        os.stat = lambda p: FakeStat()
+        try:
+            self.assertTrue(mod._is_hidden_entry("SecretDir", "/x/SecretDir"))
+        finally:
+            os.stat = real_stat
+
+    def test_windows_normal_dir_not_hidden(self):
+        class FakeStat:
+            st_file_attributes = 0x0
+        real_stat = os.stat
+        mod.IS_WIN = True
+        os.stat = lambda p: FakeStat()
+        try:
+            self.assertFalse(mod._is_hidden_entry("NormalDir", "/x/NormalDir"))
+        finally:
+            os.stat = real_stat
+
+    def test_unix_non_dot_not_hidden(self):
+        mod.IS_WIN = False
+        self.assertFalse(mod._is_hidden_entry("NormalDir", "/x/NormalDir"))
+
+    def test_stat_failure_treated_as_visible(self):
+        """读不到隐藏属性时按「可见」处理，宁可多算。"""
+        real_stat = os.stat
+        mod.IS_WIN = True
+        def boom(p):
+            raise OSError("denied")
+        os.stat = boom
+        try:
+            self.assertFalse(mod._is_hidden_entry("X", "/x/X"))
+        finally:
+            os.stat = real_stat
+
+    def test_windows_metadata_dir_name(self):
+        """Windows 的元数据目录是 .workbuddy，不是 .workbuddy-ai。"""
+        d = os.path.join(self.tmp, "ws")
+        os.makedirs(os.path.join(d, ".workbuddy", "memory"))
+        with open(os.path.join(d, ".workbuddy", "memory", "a.md"), "w") as f:
+            f.write("log")
+        self.assertFalse(mod.has_visible_content(d))
+
+    def test_count_memory_files_both_names(self):
+        d = os.path.join(self.tmp, "ws2")
+        os.makedirs(os.path.join(d, ".workbuddy-ai", "memory"))
+        os.makedirs(os.path.join(d, ".workbuddy", "memory"))
+        with open(os.path.join(d, ".workbuddy-ai", "memory", "x.md"), "w") as f:
+            f.write("l")
+        with open(os.path.join(d, ".workbuddy", "memory", "y.md"), "w") as f:
+            f.write("l")
+        self.assertEqual(mod.count_memory_files(d), 2)
+
+    def test_count_memory_files_missing_dir(self):
+        self.assertEqual(mod.count_memory_files(os.path.join(self.tmp, "nope")), 0)
+
+    def test_remove_tree_deletes_nested(self):
+        t = os.path.join(self.tmp, "todel")
+        os.makedirs(os.path.join(t, "a", "b"))
+        with open(os.path.join(t, "a", "b", "f.txt"), "w") as f:
+            f.write("x")
+        mod.remove_tree(t)
+        self.assertFalse(os.path.exists(t))
+
+    def test_remove_tree_handles_readonly_file(self):
+        """模拟 Windows 只读属性：chmod 0500 后普通 rmtree 会失败。"""
+        t = os.path.join(self.tmp, "ro")
+        os.makedirs(t)
+        f = os.path.join(t, "locked.txt")
+        with open(f, "w") as x:
+            x.write("x")
+        os.chmod(f, 0o500)
+        try:
+            mod.remove_tree(t)
+            self.assertFalse(os.path.exists(t))
+        finally:
+            if os.path.exists(t):
+                os.chmod(f, 0o700)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

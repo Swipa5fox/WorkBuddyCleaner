@@ -621,20 +621,86 @@ def _nearest_existing_ancestor(path):
     return None
 
 
+def _is_hidden_entry(name, full_path=None):
+    """判断目录项是否为「隐藏」条目。
+
+    Unix 靠名字前缀 `.`；Windows 上隐藏是文件属性而非命名约定 ——
+    WorkBuddy 在 Windows 生成的元数据目录可能叫 `.workbuddy-ai`（点开头，
+    Python 在 Win32 上会自动给点开头的文件设隐藏属性），
+    也可能只有隐藏属性、名字不带点。两种都要认。
+    """
+    if name.startswith("."):
+        return True
+    if not IS_WIN:
+        return False
+    if full_path is None:
+        return False
+    try:
+        st = os.stat(full_path)
+        # FILE_ATTRIBUTE_HIDDEN = 0x2；st_file_attributes 仅 Windows 有
+        return bool(getattr(st, "st_file_attributes", 0) & 0x2)
+    except OSError:
+        # 读不到属性时按「不隐藏」处理 —— 宁可多算成有内容，也不少算
+        return False
+
+
 def has_visible_content(path):
     """目录顶层是否有「非隐藏」的实际内容。
 
-    只有 . 开头的项（.workbuddy-ai、.memory、.DS_Store 之类）不算 ——
+    只有隐藏项（.workbuddy-ai、.DS_Store、Windows 隐藏属性的目录等）不算 ——
     那些是 WorkBuddy 自己生成的元数据，开了会话但没放进任何文件的工作空间
     顶层就只有这些。访问失败时按「有内容」处理，宁可保守。
     """
     try:
         for entry in os.listdir(path):
-            if not entry.startswith("."):
+            full = os.path.join(path, entry)
+            if not _is_hidden_entry(entry, full):
                 return True
         return False
     except OSError:
         return True
+
+
+def remove_tree(path):
+    """递归删除目录，兼容 Windows 的只读属性。
+
+    Windows 上被标记只读的文件会让 shutil.rmtree 抛 PermissionError，
+    先用 onerror 钩子去掉只读位再重试。Unix 上走正常路径。
+    """
+    def _on_error(func, target, exc_info):
+        # 只读位是 Windows 上最常见的失败原因，去掉后再试一次
+        try:
+            os.chmod(target, 0o700)
+        except OSError:
+            pass
+        try:
+            if os.path.isdir(target) and not os.path.islink(target):
+                os.rmdir(target)
+            else:
+                os.remove(target)
+        except OSError:
+            # 仍然失败就往外抛，由调用方决定怎么处理
+            raise exc_info[1]
+
+    if not IS_WIN:
+        shutil.rmtree(path)
+        return
+
+    shutil.rmtree(path, onerror=_on_error)
+
+
+def count_memory_files(workspace_path):
+    """统计工作空间里 WorkBuddy 记忆日志的个数（用于删除前告知用户）。
+
+    元数据目录名随平台不同：macOS 是 .workbuddy-ai，Windows 是 .workbuddy。
+    两种都探一遍，避免在一个平台上漏数。
+    """
+    total = 0
+    for meta in (".workbuddy-ai", ".workbuddy"):
+        mem = os.path.join(workspace_path, meta, "memory")
+        if os.path.isdir(mem):
+            total += sum(len(files) for _root, _dirs, files in os.walk(mem))
+    return total
 
 
 def classify_workspace_path(path):
@@ -1186,9 +1252,7 @@ def cmd_clean(args):
                 print("      " + C_WARN
                       + (item["state_reason"] or "目录不可达") + C_0)
             elif item["state"] == "metadata_only":
-                mem = os.path.join(item["path"], ".workbuddy-ai", "memory")
-                n = sum(len(fs) for _r, _d, fs in os.walk(mem)) \
-                    if os.path.isdir(mem) else 0
+                n = count_memory_files(item["path"])
                 print("      " + C_WARN
                       + "顶层只有隐藏元数据；删除目录将一并移除 %d 个记忆文件"
                       % n + C_0)
@@ -1311,7 +1375,7 @@ def cmd_clean(args):
                 print("  " + C_WARN + "跳过（发现实际文件，未删目录）：%s" % p + C_0)
                 continue
             try:
-                shutil.rmtree(p)
+                remove_tree(p)
                 removed_dirs += 1
                 print(C_OK + "  已删除目录 %s" % p + C_0)
             except OSError as e:
@@ -1942,12 +2006,13 @@ MENU_ITEMS = [
     ("2", "清理空壳条目", "需先退出", C_WARN, " WorkBuddy"),
     ("3", "清理并删历史文件", "需先退出", C_WARN, " WorkBuddy，多省几 MB"),
     ("4", "清理孤儿历史目录", "需先退出", C_WARN, " WorkBuddy，清 projects 残留"),
-    ("5", "安全清理缓存", "需先退出", C_WARN, " WorkBuddy，日志与缓存"),
-    ("6", "深度清理缓存", "需先退出", C_WARN, " WorkBuddy，会丢回滚"),
-    ("7", "备份数据库", "随时可用", C_OK, "，随时能跑"),
-    ("8", "查看磁盘占用", "随时可用", C_OK, "，随时能跑"),
-    ("9", "从备份还原", "需先退出", C_WARN, " WorkBuddy"),
-    ("10", "导出诊断报告", "随时可用", C_OK, "，反馈问题用"),
+    ("5", "清理仅元数据目录", "需先退出", C_WARN, " WorkBuddy，连目录一起删"),
+    ("6", "安全清理缓存", "需先退出", C_WARN, " WorkBuddy，日志与缓存"),
+    ("7", "深度清理缓存", "需先退出", C_WARN, " WorkBuddy，会丢回滚"),
+    ("8", "备份数据库", "随时可用", C_OK, "，随时能跑"),
+    ("9", "查看磁盘占用", "随时可用", C_OK, "，随时能跑"),
+    ("10", "从备份还原", "需先退出", C_WARN, " WorkBuddy"),
+    ("11", "导出诊断报告", "随时可用", C_OK, "，反馈问题用"),
 ]
 
 MENU_RULE = 62
@@ -1982,22 +2047,25 @@ def cmd_menu(args):
         "1": (cmd_scan, lambda: SimpleNamespace(db=args.db)),
         "2": (cmd_clean, lambda: SimpleNamespace(
             db=args.db, dry_run=False, yes=False, history=False,
-            sessions=False, orphans=False, force=False)),
+            sessions=False, orphans=False, force=False, metadata_only=False)),
         "3": (cmd_clean, lambda: SimpleNamespace(
             db=args.db, dry_run=False, yes=False, history=True,
-            sessions=False, orphans=False, force=False)),
+            sessions=False, orphans=False, force=False, metadata_only=False)),
         "4": (cmd_clean, lambda: SimpleNamespace(
             db=args.db, dry_run=False, yes=False, history=False,
-            sessions=False, orphans=True, force=False)),
-        "5": (cmd_cache, lambda: SimpleNamespace(
+            sessions=False, orphans=True, force=False, metadata_only=False)),
+        "5": (cmd_clean, lambda: SimpleNamespace(
+            db=args.db, dry_run=False, yes=False, history=False,
+            sessions=False, orphans=False, force=False, metadata_only=True)),
+        "6": (cmd_cache, lambda: SimpleNamespace(
             db=args.db, clean=True, deep=False, keep_days=0,
             dry_run=False, yes=False)),
-        "6": (cmd_cache, lambda: SimpleNamespace(
+        "7": (cmd_cache, lambda: SimpleNamespace(
             db=args.db, clean=True, deep=True, keep_days=0,
             dry_run=False, yes=False)),
-        "7": (cmd_backup, lambda: SimpleNamespace(db=args.db)),
-        "8": (cmd_stats, lambda: SimpleNamespace(db=args.db)),
-        "10": (cmd_report, lambda: SimpleNamespace(db=args.db, format="text",
+        "8": (cmd_backup, lambda: SimpleNamespace(db=args.db)),
+        "9": (cmd_stats, lambda: SimpleNamespace(db=args.db)),
+        "11": (cmd_report, lambda: SimpleNamespace(db=args.db, format="text",
                                                    output=None)),
     }
 
@@ -2012,7 +2080,7 @@ def cmd_menu(args):
         if choice in ("0", "q", ""):
             return
 
-        if choice == "9":
+        if choice == "10":
             print("\033[2J\033[H", end="")
             cmd_restore(SimpleNamespace(
                 db=args.db, name=None, yes=False,
