@@ -33,6 +33,7 @@ macOS 和 Windows 用的是**同一份代码**，差别只在数据目录、进�
 - [兼容性](#兼容性)
 - [版本历史](#版本历史)
 - [常见问题](#常见问题)
+- [让 AI 帮你操作](#让-ai-帮你操作)
 - [反馈问题](#反馈问题)
 - [许可](#许可)
 
@@ -653,6 +654,65 @@ A：商店版 Python 会在 `WindowsApps\python.exe` 放个占位壳，抢先响
 
 A：`scan` 数的是数据库里的记录，侧边栏可能只显示当前挂着会话的那部分，而且不重启
 不刷新。以 `scan` 为准，清完重启再对照。
+
+---
+
+## 让 AI 帮你操作
+
+不想记命令、或者搞不清自己该清哪些东西？把下面这段**整段复制**，发给你的 AI 助手
+（WorkBuddy 里的对话、ChatGPT、Claude 都行），它会带你走完整个流程。
+
+### 直接复制这段
+
+````text
+我在用 wbclean v1.4（WorkBuddy 清理器），需要你帮我操作。
+
+工具位置：~/.local/bin/wbclean（macOS）或 %LOCALAPPDATA%\wbclean\wbclean.cmd（Windows）
+
+请你按这个顺序带我走，每一步做完等我确认再继续：
+
+1. 先跑 `wbclean report --format json`，把输出读一遍，告诉我：
+   - 数据库能不能打开（app.db_exists / app.schema_ok）
+   - 有多少空壳条目（workspaces.dead）、仅元数据条目（workspaces.metadata_only）、
+     疑似离线条目（workspaces.suspect）
+   - 缓存和日志占了多少（disk 里的各项）
+   - suggestions 里有没有需要我先处理的警告
+
+2. 根据报告告诉我「能清什么、能省多少空间」，给出建议顺序。
+   如果有疑似离线条目，明确提醒我：可能是外置盘没插，清之前先插上盘重跑一次 scan。
+
+3. 别直接执行删除。先跑 `wbclean clean --dry-run` 或
+   `wbclean cache --clean --dry-run`，把「将要删什么」列给我看。
+
+4. 等我明确说「执行」之后，再跑真命令。注意：
+   - clean / cache --clean / restore 都要求先完全退出 WorkBuddy
+   - 不确定我退没退，就先让我确认
+   - 每次写操作前工具会自动备份，备份路径告诉我
+
+5. 如果报错，先跑 `wbclean report` 把完整输出贴出来，别自己猜着改参数。
+
+约束：
+- 不要修改我的系统设置、不要碰 Terminal/终端的偏好配置
+- 不要删 blobs（图片附件）、projects（会话历史）、app/session（登录态）
+- 拿不准的时候停下来问我，不要替我决定
+````
+
+### 这样有什么好处
+
+AI 会先读 `report` 的输出再动手，而不是上来就删。报告里的字段含义：
+
+| 字段 | 意思 |
+| :--- | :--- |
+| `app.schema_ok` | 数据库结构和工具预期是否一致。`false` 就先别清，结构对不上 |
+| `workspaces.dead` | 目录真的没了，清掉安全 |
+| `workspaces.metadata_only` | 目录在但一个实际文件都没有，`--metadata-only` 才清 |
+| `workspaces.suspect` | 目录此刻访问不到，可能只是盘没插，**默认不动** |
+| `disk` | 各项占用，用来判断清缓存能省多少 |
+
+### 一句提醒
+
+报告里有你的**数据目录路径和用户名**。发给公网 AI 之前扫一眼，介意就把那两行删掉。
+它不含任何会话标题、对话内容或个人文件。
 
 ---
 

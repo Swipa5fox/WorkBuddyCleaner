@@ -1575,7 +1575,8 @@ def build_report(args):
             "schema_ok": None,
             "schema_missing": [],
         },
-        "workspaces": {"total": 0, "alive": 0, "dead": 0},
+        "workspaces": {"total": 0, "alive": 0, "dead": 0,
+                       "metadata_only": 0, "suspect": 0},
         "sessions": {"total": 0, "soft_deleted": 0},
         "orphans": {"count": 0, "bytes": 0},
         "disk": {},
@@ -1607,10 +1608,12 @@ def build_report(args):
 
         data = collect(conn, verify=False)
         dead, alive = data["dead"], data["alive"]
+        meta_only = data.get("metadata_only", [])
         rep["workspaces"] = {
-            "total": len(dead) + len(alive) + len(data["suspect"]),
+            "total": len(dead) + len(alive) + len(data["suspect"]) + len(meta_only),
             "alive": len(alive),
             "dead": len(dead),
+            "metadata_only": len(meta_only),
             "suspect": len(data["suspect"]),
         }
         rep["sessions"] = {
@@ -1679,6 +1682,8 @@ def format_report_text(rep):
     lines.append("[工作空间]")
     ws = rep["workspaces"]
     ws_line = "  共 %d 条：正常 %d，空壳 %d" % (ws["total"], ws["alive"], ws["dead"])
+    if ws.get("metadata_only"):
+        ws_line += "，仅元数据 %d" % ws["metadata_only"]
     if ws.get("suspect"):
         ws_line += "，疑似离线 %d" % ws["suspect"]
     lines.append(ws_line)
