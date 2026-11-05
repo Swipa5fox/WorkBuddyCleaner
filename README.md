@@ -1,6 +1,6 @@
 # WorkBuddy Cleaner
 
-![Version](https://img.shields.io/badge/version-1.3-blue.svg)
+![Version](https://img.shields.io/badge/version-1.4-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.7%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
@@ -9,13 +9,14 @@
 > **WorkBuddy 清理器** —— 清掉侧边栏里那些「本地文件夹已经不存在」的空壳工作空间条目。
 > 命令行工具名：`wbclean`
 
-WorkBuddy 的侧边栏「空间」分组只提供逐条右键「从列表中移除」，没有批量入口。
-用得越久，空壳条目越多：它们对应的文件夹早删了，但数据库里的记录还在，列表就一直堆着。
+WorkBuddy 的侧边栏「空间」分组只能一条条右键「从列表中移除」，没有批量入口。
 
-本工具把这些空壳条目批量清掉，顺带提供诊断、备份、还原和磁盘占用统计。
+用久了就会积累一堆：文件夹早就删了，数据库里的记录还留着，列表一直堆在那儿。
+这个工具就是干这件事的——把这些空壳条目一次清掉，顺手带个诊断、备份、还原和
+磁盘占用统计。
 
-macOS 与 Windows 用**同一份代码**，差异只在数据目录、进程检测和路径规则上，
-详见 [Windows 说明](#windows-说明)。
+macOS 和 Windows 用的是**同一份代码**，差别只在数据目录、进程检测和路径规则上，
+具体见 [Windows 说明](#windows-说明)。
 
 ---
 
@@ -66,15 +67,15 @@ macOS 与 Windows 用**同一份代码**，差异只在数据目录、进程检�
    请选择（0 退出）:
 ```
 
-**它做三件事**：
+**它干三件事**：
 
-1. **清空壳** —— 删掉数据库里那些指向已不存在文件夹的工作空间记录；
-2. **清仅元数据目录** —— 顶层只有 `.workbuddy-ai`（Windows 上是 `.workbuddy`）等
-   隐藏元数据、没有任何实际文件的工作空间，可选连本地目录一起删；
-3. **清缓存** —— 删掉可再生的日志与缓存（应用重启会自己重建），可选深度清理历史回滚数据。
+1. **清空壳** —— 删掉数据库里指向已不存在文件夹的那些记录；
+2. **清仅元数据目录** —— 顶层只有 `.workbuddy-ai`（Windows 上是 `.workbuddy`）这类
+   隐藏元数据、一个实际文件都没有的工作空间，可选连本地目录一起删；
+3. **清缓存** —— 日志和缓存，应用重启会自己重建；也能深度清掉历史回滚数据。
 
-**它不会**：卸载 WorkBuddy、管理你的文件、修改工作空间内容、
-删除你上传的图片附件（`blobs`）、删除会话历史（`projects`）、动登录态（`app/session`）。
+**它不干的事**：不动 WorkBuddy 本体、不动你的文件、不改工作空间内容、
+不碰你上传的图片附件（`blobs`）、不碰会话历史（`projects`）、不碰登录态（`app/session`）。
 
 ---
 
@@ -85,8 +86,8 @@ macOS 与 Windows 用**同一份代码**，差异只在数据目录、进程检�
 
 | 平台 | 发布包 | 包里的启动器 | 解压 |
 | :--- | :--- | :--- | :--- |
-| macOS（Linux 同一份） | `wbclean-1.3-macos.tar.gz` | `install.sh`、`wbclean.command` | `tar -xzf wbclean-1.3-macos.tar.gz` |
-| Windows 10 / 11 | `wbclean-1.3-windows.zip` | `install.ps1`、`wbclean.bat` | 右键「全部解压」 |
+| macOS（Linux 同一份） | `wbclean-1.4-macos.tar.gz` | `install.sh`、`wbclean.command` | `tar -xzf wbclean-1.4-macos.tar.gz` |
+| Windows 10 / 11 | `wbclean-1.4-windows.zip` | `install.ps1`、`wbclean.bat` | 右键「全部解压」 |
 
 两个包里的 `bin/wbclean`、`README.md`、`LICENSE` 完全一致，
 差别只在启动脚本：`install.sh` / `wbclean.command` 用 LF 换行且带可执行位，
@@ -101,10 +102,10 @@ macOS 与 Windows 用**同一份代码**，差异只在数据目录、进程检�
 
 ```bash
 # macOS
-shasum -a 256 wbclean-1.3-macos.tar.gz
+shasum -a 256 wbclean-1.4-macos.tar.gz
 
 # Windows（PowerShell）
-Get-FileHash .\wbclean-1.3-windows.zip -Algorithm SHA256
+Get-FileHash .\wbclean-1.4-windows.zip -Algorithm SHA256
 ```
 
 对照 Release 页面里列出的校验值即可。
@@ -168,8 +169,8 @@ Get-FileHash .\wbclean-1.3-windows.zip -Algorithm SHA256
 
 ```bash
 # 解压发布包，或 git clone 后 cd 进去
-tar -xzf wbclean-1.3-macos.tar.gz
-cd wbclean-1.3-macos
+tar -xzf wbclean-1.4-macos.tar.gz
+cd wbclean-1.4-macos
 
 ./install.sh
 ```
@@ -199,7 +200,7 @@ wbclean scan
 **Add python.exe to PATH**）。没装也能先跑起来，启动器会退到 WorkBuddy 自带的解释器，
 但装一个更省事。
 
-解压 `wbclean-1.3-windows.zip`（或 `git clone` 后进入目录），在该目录打开 PowerShell：
+解压 `wbclean-1.4-windows.zip`（或 `git clone` 后进入目录），在该目录打开 PowerShell：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -298,31 +299,31 @@ wbclean restore 20261029-143022  # 还原到指定备份
 
 ### 缓存清理：两级，白名单制
 
-`wbclean cache` 采用**白名单**：只有下面列出的目录会被删除，不在名单里的一律不碰。
+`wbclean cache` 走的是**白名单**——只有下面这几个目录会被删，不在这张表里的一律不碰。
 
-**安全清理**（`--clean`）—— 应用重启会自动重建：
-
-| 目录 | 内容 | 说明 |
-| :--- | :--- | :--- |
-| `logs/` | 运行日志、沙箱日志、滚动旧日志 | 通常最大头，几百 MB 级 |
-| `cache/` | 产品配置与会话快照 | 应用会重新拉取 |
-| `app/cache/` | Electron 渲染进程缓存 | 可安全删除 |
-
-Windows 上额外多一项（Electron 主进程日志另存一份，不在数据目录里）：
+**安全清理**（`--clean`）：应用重启会自己重建，删了不心疼。
 
 | 目录 | 内容 | 说明 |
 | :--- | :--- | :--- |
-| `%LOCALAPPDATA%\WorkBuddy\logs\` | 启动器与渲染进程日志 | 可安全删除 |
+| `logs/` | 运行日志、沙箱日志、滚动旧日志 | 通常最大头，几百 MB 起步 |
+| `cache/` | 产品配置与会话快照 | 应用会重新拉 |
+| `app/cache/` | Electron 渲染进程缓存 | 随便删 |
 
-**深度清理**（`--clean --deep`）—— 会丢失部分历史能力：
+Windows 上还多一项（Electron 主进程日志另存了一份，不在数据目录里）：
+
+| 目录 | 内容 | 说明 |
+| :--- | :--- | :--- |
+| `%LOCALAPPDATA%\WorkBuddy\logs\` | 启动器与渲染进程日志 | 随便删 |
+
+**深度清理**（`--clean --deep`）：会丢掉一些历史能力，想清楚再加。
 
 | 目录 | 内容 | 代价 |
 | :--- | :--- | :--- |
-| `file-history/` | 文件回滚历史 | 无法再回滚历史文件改动 |
-| `changes-detail/` | 变更详情 | 历史变更记录不可查看 |
-| `artifact-index/` | 产物索引 | 产物列表需要重建 |
+| `file-history/` | 文件回滚历史 | 以后滚不回改过的文件了 |
+| `changes-detail/` | 变更详情 | 历史变更记录看不了 |
+| `artifact-index/` | 产物索引 | 产物列表要重建 |
 
-**受保护，永不删除**：
+**这些绝对不碰**：
 
 | 目录 | 内容 |
 | :--- | :--- |
@@ -470,25 +471,25 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 
 ### 扫描逻辑是动态的
 
-**不硬编码任何具体的工作空间路径。** 做法是：
+工作空间的路径**不写死**在任何地方。流程是这样的：
 
-1. 读 `workspaces` 表的全部记录，每条记录里存着工作空间的绝对路径；
-2. 路径先做归一化（大小写、斜杠、尾分隔符），Windows 上同一个目录的
-   `C:\...` 和 `C:/...` 两种写法才会归到同一条记录上；
-3. 对每个路径做**三态判定**，而不是简单的「存在 / 不存在」：
+1. 把 `workspaces` 表里所有记录读出来，每条带着工作空间的绝对路径；
+2. 路径先归一化（大小写、斜杠、末尾分隔符），这样 Windows 上同一个目录的
+   `C:\...` 和 `C:/...` 两种写法能归到一条记录上；
+3. 对每个路径做**三态判定**，而不是简单的「在 / 不在」：
 
    | 判定 | 依据 | 处理 |
    | :--- | :--- | :--- |
    | 正常 | 目录能访问 | 保留 |
    | 空壳 | 父目录在、自己不在 | 进清理范围 |
-   | 疑似离线 | 卷未挂载（`/Volumes/X` 不存在、Windows 盘符未连接）、上级目录也缺失、访问报错 | **一律不动** |
+   | 疑似离线 | 卷未挂载（`/Volumes/X` 不存在、Windows 盘符没连）、上级目录也缺失、访问报错 | **一律不动** |
 
-   把「外置盘没插」当成「目录被删」是这类工具最容易犯的错：等盘插回来，
-   侧边栏里的条目已经没了；带 `--history` 时连会话历史都会被一起删掉。
-4. 只有「空壳」会进清理范围；「疑似离线」只在输出里提示，
-   确认目录确实删了，才用 `clean --force` 显式覆盖。
+   把「外置盘没插」判成「目录被删」是这类工具最容易栽的坑：等盘插回来，
+   侧边栏条目已经没了；要是带了 `--history`，会话历史也一起没了。
+4. 只有「空壳」进清理范围。「疑似离线」只在输出里提示一下，等你确认目录是真删了，
+   再用 `clean --force` 显式覆盖。
 
-所以即使你改过 WorkBuddy 的「默认保存路径」，新旧工作空间也一视同仁。
+所以你就算改过 WorkBuddy 的「默认保存路径」也没关系，新旧工作空间一视同仁。
 
 ### 清理时到底删什么
 
@@ -549,10 +550,10 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 | :--- | :--- |
 | macOS | 支持（主要开发与测试平台） |
 | Windows | 支持（Windows 10 / 11，进程检测走 Win32 API，无需 `lsof`） |
-| Linux | 理论可用，未实测（发布包用 `wbclean-1.3-macos.tar.gz` 那份） |
+| Linux | 理论可用，未实测（发布包用 `wbclean-1.4-macos.tar.gz` 那份） |
 | Python | 3.7 及以上（CI 覆盖 3.9 与 3.13） |
 | 第三方依赖 | 无 |
-| 发布包 | `wbclean-1.3-macos.tar.gz` / `wbclean-1.3-windows.zip` |
+| 发布包 | `wbclean-1.4-macos.tar.gz` / `wbclean-1.4-windows.zip` |
 
 ---
 
@@ -560,76 +561,98 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 
 | 版本 | 主要变化 |
 | :--- | :--- |
+| **1.4**（2026-11-04） | 识别「仅元数据」工作空间：目录在、但顶层只有 `.workbuddy-ai` 这类隐藏元数据，一个实际文件都没有——旧版只判断「目录在不在」，会把这些一直留在侧边栏。新增 `clean --metadata-only` 连目录一起清，菜单加第 5 项。Windows 侧修了三处：隐藏属性判定（`FILE_ATTRIBUTE_HIDDEN`）、元数据目录名（`.workbuddy`）、只读文件删除（`remove_tree`）。 |
 | **1.3**（2026-11-02 重建） | 三处修复：① 疑似离线的条目（外置盘没挂载、网络盘掉线）不再被当成空壳清理，新增 `clean --force` 显式覆盖；② `--keep-days` 改为「含今天的 N 个日历日」，`sandbox/`、`*.old.log` 等非日期条目按 mtime 判断；③ `--db` 不再被 `--app-home` / `WBCLEAN_APP_HOME` 静默覆盖。`--version` 起带构建日期 |
 | **1.3** | **支持 Windows**（与 macOS 同一份代码，发布包分开）；新增孤儿历史目录清理 `clean --orphans`；`clean` 结束时写 `deleted.json` 删除清单；备份目录跟随 `--app-home`；菜单扩到 10 项 |
 | 1.2 | 新增缓存清理，分安全 / 深度两级，白名单制 |
 | 1.1 | 首个公开版本：扫描、清理空壳、备份、还原、诊断报告 |
 
-升级方式：覆盖安装即可（`install.sh` / `install.ps1` 会先备份旧版本）。
-数据库结构没变，备份可以跨版本还原。
+升级直接覆盖装就行（`install.sh` / `install.ps1` 会先把旧版备份一份）。
+数据库结构一直没变，备份可以跨版本还原。
 
 ---
 
 ## 常见问题
 
-**清理后侧边栏还是老样子？**
-清的是数据库记录，需要重启 WorkBuddy 才会刷新。
+**Q：清理完侧边栏还是老样子？**
 
-**会不会删掉我的文件？**
-清理空壳条目时不动任何本地文件夹。唯一会删文件的是 `--history`，
-它只删「工作空间文件夹已经不存在」的那些历史会话目录。
-外置盘没挂载、网络盘掉线的条目会被归为「疑似离线」并跳过，
-不会因为它们此刻访问不到就把条目和历史一起清掉。
+A：清的是数据库记录，得重启 WorkBuddy 才会重新读。
 
-**能恢复吗？**
-可以。每次写操作前自动备份，用 `wbclean restore` 选时间戳还原。
-备份默认在 `~/WorkBuddy清理备份/`；用 `--app-home` 指向别处的数据目录时，
-备份会跟着放到那个目录的同级，不会混进 home 里。
+**Q：会不会把我文件删了？**
 
-**为什么必须退出 WorkBuddy？**
-WorkBuddy 运行时会持有数据库连接和 WAL 文件。并发写入有损坏风险，
-所以工具宁可停下来让你退出，也不冒这个险。
+A：清空壳条目的时候不碰任何本地文件夹。
 
-**升级 WorkBuddy 后报「数据库结构不一致」？**
-说明官方改了表或字段。工具会列出具体缺失项然后停下，不会改任何数据。
-把 `wbclean report` 的输出贴到 issue 即可。
+真正会删文件的只有 `--history` 和 `--metadata-only` 两个开关：前者只删「工作空间文件夹
+已经不存在」的历史会话目录，后者只删「顶层一个实际文件都没有」的目录，而且执行前
+还会再查一遍——要是你在确认之后往里放了东西，那个目录会被跳过。
 
-**清理缓存会不会影响正在用的东西？**
-`--clean` 只清日志和缓存，应用重启会自动重建，不影响任何功能。
-`--deep` 会删掉文件回滚历史和变更记录 —— 如果你之后还想回滚改过的文件，别加 `--deep`。
-无论哪一级，都不会动你的图片附件、会话记录和工作空间文件夹。
+外置盘没挂载、网络盘掉线的条目会被归到「疑似离线」里跳过，不会因为此刻访问不到
+就顺手把条目和历史一起清了。
 
-**日志里有我排查问题要用的信息，能只清一部分吗？**
-可以。`--keep-days N` 保留最近 N 个日历日（含今天）：日期目录按目录名判断，
-`sandbox/`、`*.old.log` 这类没有日期的条目按修改时间判断：
+**Q：删错了还能救回来吗？**
+
+A：能。每次写操作前都会自动备份，`wbclean restore` 列出来挑个时间点还原就行。
+
+备份默认在 `~/WorkBuddy清理备份/`。如果用 `--app-home` 指到别处的数据目录，
+备份会跟着放在那个目录同级，不会散落到 home 里。
+
+**Q：为什么非要退出 WorkBuddy？**
+
+A：它运行时握着数据库连接和 WAL 文件。两边同时写有损坏风险，这赌不起，所以工具
+宁可停下来让你关掉，也不去抢。
+
+**Q：升级 WorkBuddy 之后报「数据库结构不一致」？**
+
+A：官方改了表或者字段。工具会把缺哪几个列出来然后停下，一个字节都不会改。
+
+把 `wbclean report` 的输出贴到 issue 里就行，我按着缺失项改适配。
+
+**Q：清缓存会不会把正在用的东西搞坏？**
+
+A：`--clean` 只动日志和缓存，应用下次启动自己重建，功能上没影响。
+
+`--deep` 会连文件回滚历史和变更记录一起删——如果你之后还想回滚改过的文件，
+别加这个参数。哪一级都不会碰你的图片附件、会话记录和工作空间文件夹。
+
+**Q：日志里有我要排查问题的信息，能只清一部分吗？**
+
+A：能，`--keep-days N` 保留最近 N 个日历日（含今天）。日期目录按目录名判断，
+`sandbox/`、`*.old.log` 这种没日期的按修改时间判断：
 
 ```bash
 wbclean cache --clean --keep-days 7
 ```
 
-**下错包了怎么办？**
-看扩展名区分：`.zip` 是 Windows 包，`.tar.gz` 是 macOS 包。内容里的 `bin/wbclean`
-完全一样，差别只在启动脚本的换行符和可执行位。Windows 上下错成 `.tar.gz`
-会解出一堆 CRLF 不匹配的脚本，双击 `install.sh` 自然没反应。
+**Q：包下错了怎么办？**
 
-**Windows 上双击 `wbclean.bat` 窗口一闪就没了？**
-说明 Python 没找到，脚本退出前打印了错误但窗口已经关了。
+A：看扩展名——`.tar.gz` 是 macOS 的，`.zip` 是 Windows 的。
+
+里面那个 `bin/wbclean` 两份完全一样，区别只在启动脚本的换行符和可执行位。
+Windows 上下错成 `.tar.gz`，解出来会是一堆换行符不对的脚本，双击 `install.sh`
+当然没反应。
+
+**Q：Windows 上双击 `wbclean.bat`，窗口一闪就没了？**
+
+A：多半是没找到 Python。脚本退出前其实打了错误信息，只是窗口跟着关了看不到。
+
 在 PowerShell 里跑一次看具体报错：
 
 ```powershell
 python bin\wbclean --version
 ```
 
-如果提示找不到 Python，装一个（安装时勾上 Add python.exe to PATH）再试。
+提示找不到 Python 就装一个，安装时记得勾上「Add python.exe to PATH」。
 
-**Windows 上提示「Python 3.7+ not found」，但我明明装了？**
-商店版 Python 有个 `WindowsApps\python.exe` 的占位符会抢先响应 `python` 命令，
-它只是个跳转壳。用 `py -3 --version` 确认真实解释器在不在；
-在的话用 `py -3 bin\wbclean scan` 直接调用即可。
+**Q：明明装了 Python，Windows 还说「Python 3.7+ not found」？**
 
-**侧边栏条目数跟 `scan` 报的不一样？**
-`scan` 统计的是数据库里的记录数，侧边栏可能只显示当前挂载了会话的那部分，
-而且应用不重启不会刷新列表。以 `scan` 的数字为准，清理后重启应用对照。
+A：商店版 Python 会在 `WindowsApps\python.exe` 放个占位壳，抢先响应 `python` 命令。
+
+先用 `py -3 --version` 确认真解释器在不在；在的话直接 `py -3 bin\wbclean scan` 调。
+
+**Q：侧边栏的条目数跟 `scan` 报的对不上？**
+
+A：`scan` 数的是数据库里的记录，侧边栏可能只显示当前挂着会话的那部分，而且不重启
+不刷新。以 `scan` 为准，清完重启再对照。
 
 ---
 
