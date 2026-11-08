@@ -270,6 +270,27 @@ class WindowsPathKeyTests(unittest.TestCase):
     def test_macos_has_no_reverse(self):
         self.assertIsNone(mod.path_from_project_key("Users-foo-x", is_win=False))
 
+    def test_reverse_keeps_timestamp_dashes(self):
+        """时间戳目录名里的 - 不是分隔符，不能解成 2026\\10\\01\\15\\46\\26。"""
+        root = tempfile.mkdtemp(prefix="wbrev")
+        try:
+            ws = os.path.join(root, "2026-10-01-15-46-26")
+            key = self.key(ws)
+            self.assertEqual(mod.path_from_project_key(key, is_win=True), ws)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_reverse_prefers_existing_path(self):
+        """带 - 的目录若真实存在，必须原样解回去。"""
+        root = tempfile.mkdtemp(prefix="wbrev")
+        try:
+            ws = os.path.join(root, "My-Project")
+            os.makedirs(ws)
+            self.assertEqual(
+                mod.path_from_project_key(self.key(ws), is_win=True), ws)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 class NormPathTests(unittest.TestCase):
     """路径归一化 —— 会话归属统计能不能算准全靠它。"""

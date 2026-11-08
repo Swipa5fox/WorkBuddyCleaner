@@ -61,7 +61,7 @@ from types import SimpleNamespace
 VERSION = "1.4"
 # 同一个版本号可能被重新构建过（修 bug 但不改对外版本），
 # 带上构建日期，用户反馈问题时才能分清跑的是哪一版。
-BUILD = "2026-11-04"
+BUILD = "2026-11-08"
 
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
@@ -460,10 +460,13 @@ def project_dir_for(workspace_path):
 def path_from_project_key(key, is_win=None):
     """projects 目录名反解回原路径 —— 尽力而为，不能当删除依据。
 
-    Windows 上可以按「盘符 + 剩余全部换回反斜杠」反解，但原路径里的 -
-    和分隔符转出来的 - 长得一模一样，带横线的目录名会解错。
-    所以这个结果只用来判断「目标还在不在」，真删之前必须再过一遍
-    sessions 表里记着的真实路径。
+    Windows 上目录名是把 : 和 \\ 都换成 -，但原路径本身也可能带 -，
+    没法唯一还原。做法是从「尽量少合并」开始枚举，取第一个父目录真实存在的
+    组合 —— 真实路径的上级目录必然存在，这个约束足够把 - 挑出来：
+
+        c-Users-Administrator-WorkBuddy-2026-10-01-15-46-26
+          → C:\\Users\\Administrator\\WorkBuddy\\2026-10-01-15-46-26
+          （时间戳里的 - 不能当目录分隔符，否则解出 ...\\2026\\10\\01\\15\\46\\26）
 
     macOS 上目录名丢掉了开头的 /，也无法区分，直接放弃反解。
     """
@@ -474,7 +477,22 @@ def path_from_project_key(key, is_win=None):
     m = re.match(r"^([a-z])-(.+)$", key)
     if not m:
         return None
-    return "%s:\\%s" % (m.group(1).upper(), m.group(2).replace("-", "\\"))
+
+    base = "%s:\\" % m.group(1).upper()
+    parts = m.group(2).split("-")
+    naive = base + "\\".join(parts)
+    # k = 末尾有几段其实属于同一个带 - 的目录名；k 小的先试（最常见）
+    cands = [base + "\\".join(parts[:-k] + ["-".join(parts[-k:])])
+             for k in range(1, len(parts))]
+    cands.append(naive)
+    # 先看哪个候选真的存在 —— 路径还在时不能靠「父目录存在」去猜
+    for c in cands:
+        if os.path.isdir(c):
+            return c
+    for c in cands:
+        if os.path.isdir(os.path.dirname(c)):
+            return c
+    return naive
 
 
 def safe_under(path, parent):
@@ -1364,8 +1382,8 @@ def cmd_clean(args):
     # 仅元数据条目：连本地目录一起删。
     # 删之前重新检查 —— 确认到执行之间用户可能往里放了实际文件，
     # 一旦发现可见内容就跳过，宁可留一个孤儿目录也不能删用户文件。
+    removed_meta, failed_meta = [], []
     if meta_targets:
-        removed_dirs = 0
         print()
         for item in meta_targets:
             p = item["path"]
@@ -1373,15 +1391,32 @@ def cmd_clean(args):
                 continue
             if has_visible_content(p):
                 print("  " + C_WARN + "跳过（发现实际文件，未删目录）：%s" % p + C_0)
+                failed_meta.append({"dir": p, "reason": "发现实际文件，未删"})
                 continue
+            size = dir_size(p)
             try:
                 remove_tree(p)
-                removed_dirs += 1
-                print(C_OK + "  已删除目录 %s" % p + C_0)
+                # Windows 上有句柄没释放时 rmtree 会把内容删干净、
+                # 只留下一个空目录壳，这里补一刀，还不行才算失败
+                if os.path.isdir(p):
+                    try:
+                        os.rmdir(p)
+                    except OSError:
+                        pass
+                if os.path.isdir(p):
+                    print("  " + C_WARN + "目录未删净（可能被占用）：%s" % p + C_0)
+                    failed_meta.append({"dir": p, "reason": "目录未删净，可能被占用"})
+                else:
+                    removed_meta.append({"dir": p, "bytes": size})
+                    print(C_OK + "  已删除目录 %s" % p + C_0)
             except OSError as e:
                 print("  " + C_WARN + "删除失败 %s: %s" % (p, e) + C_0)
-        if removed_dirs:
-            print(C_OK + "  共删除 %d 个本地目录" % removed_dirs + C_0)
+                failed_meta.append({"dir": p, "reason": str(e)})
+        if removed_meta:
+            print(C_OK + "  共删除 %d 个本地目录" % len(removed_meta) + C_0)
+        if failed_meta:
+            print("  " + C_WARN + "  %d 个目录没删成，清单里记了原因"
+                  % len(failed_meta) + C_0)
 
     # 显示名配置
     n_names = 0
@@ -1459,8 +1494,10 @@ def cmd_clean(args):
         "display_names_deleted": n_names,
         "history_dirs": {"removed": removed_history, "skipped": failed_history},
         "orphan_dirs": {"removed": removed_orphans, "skipped": failed_orphans},
+        "metadata_only_dirs": {"removed": removed_meta, "failed": failed_meta},
         "freed_bytes": sum(d["bytes"] for d in removed_history)
-                       + sum(d["bytes"] for d in removed_orphans),
+                       + sum(d["bytes"] for d in removed_orphans)
+                       + sum(d["bytes"] for d in removed_meta),
     }
     manifest_path = os.path.join(dest_dir, "deleted.json")
     try:
