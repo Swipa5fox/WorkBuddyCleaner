@@ -142,6 +142,8 @@ ORPH_ALIVE2 = os.path.join(WSROOT, "alive_no_sess")  # 路径存在 + 无会话
 os.makedirs(KEEP)
 os.makedirs(ORPH_ALIVE)
 os.makedirs(ORPH_ALIVE2)
+# 真实工作空间顶层总得有点东西：v1.4 起「只有隐藏元数据的空目录」算另一类
+touch(os.path.join(KEEP, "notes.md"), 256)
 
 import importlib.machinery  # noqa: E402
 import importlib.util  # noqa: E402
@@ -544,6 +546,7 @@ TRI_DEEP = os.path.join(TRI, "deep", "missing", "ws")  # 上级目录也不存�
 TRI_OFFLINE = "Z:\\wbclean_no_such_volume\\ws"         # 盘符未连接
 
 os.makedirs(TRI_ALIVE)          # 注意：TRI 存在，TRI_DEAD / TRI_DEEP 都不建
+touch(os.path.join(TRI_ALIVE, "notes.md"), 128)   # 有实际文件才算「正常」
 
 # Z: 万一真被占用了就跳过盘符那条，免得测试机不同导致假失败
 use_offline_drive = not os.path.exists("Z:\\")
@@ -623,6 +626,30 @@ p = run(["--app-home", TRI, "clean", "--yes", "--force"], use_home=False,
         extra_prefix=("--skip-process-check",))
 rows = tri_rows()
 eq("--force 后疑似离线条目清掉", rows, [TRI_ALIVE])
+
+# ---- v1.4 新增：仅元数据（顶层只有 .workbuddy-ai 之类隐藏项）
+META = os.path.join(TRI, "ws_meta")
+os.makedirs(os.path.join(META, ".workbuddy-ai", "sessions"))
+touch(os.path.join(META, ".workbuddy-ai", "sessions", "s1.jsonl"), 128)
+c = sqlite3.connect(TRI_DB)
+c.execute("INSERT INTO workspaces VALUES (?,?)", (META, now_ms))
+c.execute("INSERT INTO sessions VALUES (?,?,?,?)", ("tm", META, "done", now_ms))
+c.commit()
+c.close()
+
+p = run(["--app-home", TRI, "scan"], use_home=False)
+check("scan 单独统计仅元数据", "仅元数据 1" in p.stdout, p.stdout[:900])
+check("scan 提示 --metadata-only", "--metadata-only" in p.stdout, p.stdout[:1600])
+
+p = run(["--app-home", TRI, "clean", "--yes"], use_home=False,
+        extra_prefix=("--skip-process-check",))
+check("默认 clean 不动仅元数据（记录还在）", META in tri_rows(), str(tri_rows()))
+check("默认 clean 不动仅元数据（目录还在）", os.path.isdir(META))
+
+p = run(["--app-home", TRI, "clean", "--yes", "--metadata-only"],
+        use_home=False, extra_prefix=("--skip-process-check",))
+check("--metadata-only 清掉记录", META not in tri_rows(), str(tri_rows()))
+check("--metadata-only 连本地目录一起删", not os.path.isdir(META), META)
 
 print("\n============================================================")
 print(" 第 10 轮：--db 与 --app-home 的优先级")
