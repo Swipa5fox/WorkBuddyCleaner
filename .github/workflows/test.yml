@@ -42,25 +42,9 @@ jobs:
           python bin/wbclean --version
           python bin/wbclean report --format json | python -c "import json,sys; d=json.load(sys.stdin); print('report JSON ok, schema_ok =', d['app']['schema_ok'])"
 
-      # 启动器曾经把 menu 写死、不转发参数，命令行用法一律弹菜单。
-      # 这两步是真的跑一遍启动器，不是静态检查。
-      # Windows 上必须把 stdin 接到 nul：万一回归成菜单，pause 会一直等按键。
-      - name: 启动器自检（Windows，参数必须转发到 CLI）
-        if: runner.os == 'Windows'
-        shell: cmd
-        timeout-minutes: 2
-        run: |
-          wbclean.bat --version < nul > launcher.txt 2>&1
-          rem 用 findstr 直接打印命中的那一行，日志里才有证据可看
-          findstr /B /C:"wbclean " launcher.txt || exit /b 1
-
-      - name: 启动器自检（macOS，参数必须转发到 CLI）
-        if: runner.os == 'macOS'
-        timeout-minutes: 2
-        run: |
-          out="$(./wbclean.command --version)"
-          printf '%s\n' "$out"
-          printf '%s' "$out" | grep -q '^wbclean ' || exit 1
+      # 启动器是否转发参数，由 tests 里的 LauncherTests 真跑一遍（跨平台统一，
+      # 输出也落在测试日志里）。这里不再单独跑 .bat —— cmd 里 chcp 换代码页
+      # 会把 runner 的 stdout 管道搅坏，命令照常执行但日志是空的，等于没证据。
 
   package:
     runs-on: ubuntu-24.04
