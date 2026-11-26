@@ -91,8 +91,8 @@ macOS 和 Windows 用的是**同一份代码**，差别只在数据目录、进�
 
 | 平台 | 发布包 | 包里的启动器 | 解压 |
 | :--- | :--- | :--- | :--- |
-| macOS（Linux 同一份） | `wbclean-1.4-macos.tar.gz` | `install.sh`、`wbclean.command` | `tar -xzf wbclean-1.4-macos.tar.gz` |
-| Windows 10 / 11 | `wbclean-1.4-windows.zip` | `install.ps1`、`wbclean.bat` | 右键「全部解压」 |
+| macOS（Linux 同一份） | `wbclean-1.5-macos.tar.gz` | `install.sh`、`wbclean.command` | `tar -xzf wbclean-1.5-macos.tar.gz` |
+| Windows 10 / 11 | `wbclean-1.5-windows.zip` | `install.ps1`、`wbclean.bat` | 右键「全部解压」 |
 
 两个包里的 `bin/wbclean`、`README.md`、`LICENSE` 完全一致，
 差别只在启动脚本：`install.sh` / `wbclean.command` 用 LF 换行且带可执行位，
@@ -107,10 +107,10 @@ macOS 和 Windows 用的是**同一份代码**，差别只在数据目录、进�
 
 ```bash
 # macOS
-shasum -a 256 wbclean-1.4-macos.tar.gz
+shasum -a 256 wbclean-1.5-macos.tar.gz
 
 # Windows（PowerShell）
-Get-FileHash .\wbclean-1.4-windows.zip -Algorithm SHA256
+Get-FileHash .\wbclean-1.5-windows.zip -Algorithm SHA256
 ```
 
 对照 Release 页面里列出的校验值即可。
@@ -177,8 +177,8 @@ Get-FileHash .\wbclean-1.4-windows.zip -Algorithm SHA256
 
 ```bash
 # 解压发布包，或 git clone 后 cd 进去
-tar -xzf wbclean-1.4-macos.tar.gz
-cd wbclean-1.4-macos
+tar -xzf wbclean-1.5-macos.tar.gz
+cd wbclean-1.5-macos
 
 ./install.sh
 ```
@@ -208,7 +208,7 @@ wbclean scan
 **Add python.exe to PATH**）。没装也能先跑起来，启动器会退到 WorkBuddy 自带的解释器，
 但装一个更省事。
 
-解压 `wbclean-1.4-windows.zip`（或 `git clone` 后进入目录），在该目录打开 PowerShell：
+解压 `wbclean-1.5-windows.zip`（或 `git clone` 后进入目录），在该目录打开 PowerShell：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -647,10 +647,10 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 | :--- | :--- |
 | macOS | 支持（主要开发与测试平台） |
 | Windows | 支持（Windows 10 / 11，进程检测走 Win32 API，无需 `lsof`） |
-| Linux | 理论可用，未实测（发布包用 `wbclean-1.4-macos.tar.gz` 那份） |
+| Linux | 理论可用，未实测（发布包用 `wbclean-1.5-macos.tar.gz` 那份） |
 | Python | 3.7 及以上（CI 覆盖 3.9 与 3.13） |
 | 第三方依赖 | 无 |
-| 发布包 | `wbclean-1.4-macos.tar.gz` / `wbclean-1.4-windows.zip` |
+| 发布包 | `wbclean-1.5-macos.tar.gz` / `wbclean-1.5-windows.zip` |
 
 ---
 
@@ -658,8 +658,7 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 
 | 版本 | 主要变化 |
 | :--- | :--- |
-| **1.5**（2026-11-26 重建） | 修两个启动器的参数转发：`wbclean.bat` / `wbclean.command` 以前把 `menu` 写死、从不转发 `%*` / `$@`，导致解压后不安装、直接在命令行跑 `wbclean.bat scan` 一律弹交互菜单。现在有参数走命令行（不清屏、不等按键、退出码原样返回），没参数（双击）才进菜单。修复 `--orphans` 在 macOS 上完全失效：孤儿历史目录的来源路径只靠 `sessions.cwd` 反查和目录名反解，而 macOS 的目录名丢掉了开头的 `/`、分隔符与真实横线无法区分，反解必然返回空；会话记录一旦被删，两条依据同时断，所有历史目录都被误判成「疑似离线」，`--orphans` 报 0 个。新增第三级依据：从历史文件内的 `Workspace Folder` 字段读回路径，并用「编码回去必须等于目录名」自校验，猜错就丢弃。实盘 17 个 / 14.4 MB 从「查不出」变为可正常清理。同时收紧 Windows 侧两处：目录名反解不再靠「父目录存在」瞎合并（`C:\Users` 每台机器都有，会把 `c-Users-foo-My-Project` 解成 `C:\Users\foo-My-Project`），只在合并出的尾巴是时间戳时才合并；历史文件里的路径解析支持反斜杠（原来把 `\` 排除在字符类外，Windows 路径只会截出个 `C:`）。 |
-| **1.5**（2026-11-09） | 新增插件治理：`plugins` 子命令扫描插件缓存，清理升级后留下的旧版本目录（实测可回收上百 MB），支持按插件名禁用 / 启用 / 连缓存一起删。旧版本判定优先用应用自带的 `.orphaned_at` 标记，读不到时退回清单比对，在用版本永不删。清理只检查目标文件是否被占用，不必退出应用。`--purge-source` 可连市场源副本一起删。菜单加 12、13 两项。 |
+| **1.5**（2026-11-26） | 新增插件治理：`plugins` 子命令扫描插件缓存，清理升级后留下的旧版本目录（实测可回收上百 MB），支持按插件名禁用 / 启用 / 连缓存一起删。旧版本判定优先用应用自带的 `.orphaned_at` 标记，读不到时退回清单比对，在用版本永不删。清理只检查目标文件是否被占用，不必退出应用。`--purge-source` 可连市场源副本一起删。菜单加 12、13 两项。修复 `--orphans` 在 macOS 上完全失效：孤儿历史目录的来源路径只靠 `sessions.cwd` 反查和目录名反解，而 macOS 的目录名丢掉了开头的 `/`、分隔符与真实横线无法区分，反解必然返回空；会话记录一旦被删，两条依据同时断，所有历史目录都被误判成「疑似离线」，`--orphans` 报 0 个。新增第三级依据：从历史文件内的 `Workspace Folder` 字段读回路径，并用「编码回去必须等于目录名」自校验，猜错就丢弃。实盘 17 个 / 14.4 MB 从「查不出」变为可正常清理。修两个启动器的参数转发：`wbclean.bat` / `wbclean.command` 以前把 `menu` 写死、从不转发 `%*` / `$@`，导致解压后不安装、直接在命令行跑 `wbclean.bat scan` 一律弹交互菜单。现在有参数走命令行（不清屏、不等按键、退出码原样返回），没参数（双击）才进菜单。同时收紧 Windows 侧三处：目录名反解不再靠「父目录存在」瞎合并（`C:\Users` 每台机器都有，会把 `c-Users-foo-My-Project` 解成 `C:\Users\foo-My-Project`），只在合并出的尾巴是时间戳时才合并；历史文件里的路径解析支持反斜杠（原来把 `\` 排除在字符类外，Windows 路径只会截出个 `C:`）；macOS 启动器改为包内优先，装过旧版再解压新版不会静默跑旧版。 |
 | **1.4**（2026-11-04） | 识别「仅元数据」工作空间：目录在、但顶层只有 `.workbuddy-ai` 这类隐藏元数据，一个实际文件都没有——旧版只判断「目录在不在」，会把这些一直留在侧边栏。新增 `clean --metadata-only` 连目录一起清，菜单加第 5 项。Windows 侧修了三处：隐藏属性判定（`FILE_ATTRIBUTE_HIDDEN`）、元数据目录名（`.workbuddy`）、只读文件删除（`remove_tree`）。 |
 | **1.3**（2026-11-02 重建） | 三处修复：① 疑似离线的条目（外置盘没挂载、网络盘掉线）不再被当成空壳清理，新增 `clean --force` 显式覆盖；② `--keep-days` 改为「含今天的 N 个日历日」，`sandbox/`、`*.old.log` 等非日期条目按 mtime 判断；③ `--db` 不再被 `--app-home` / `WBCLEAN_APP_HOME` 静默覆盖。`--version` 起带构建日期 |
 | **1.3** | **支持 Windows**（与 macOS 同一份代码，发布包分开）；新增孤儿历史目录清理 `clean --orphans`；`clean` 结束时写 `deleted.json` 删除清单；备份目录跟随 `--app-home`；菜单扩到 10 项 |
@@ -763,7 +762,7 @@ A：`scan` 数的是数据库里的记录，侧边栏可能只显示当前挂着
 ### 直接复制这段
 
 ````text
-我在用 wbclean v1.4（WorkBuddy 清理器），需要你帮我操作。
+我在用 wbclean v1.5（WorkBuddy 清理器），需要你帮我操作。
 
 工具位置：~/.local/bin/wbclean（macOS）或 %LOCALAPPDATA%\wbclean\wbclean.cmd（Windows）
 
