@@ -237,10 +237,12 @@ wbclean --version
 wbclean scan
 ```
 
-不想装也行 —— 解压目录里的 `wbclean.bat` 双击就能开菜单：
+不想装也行 —— 解压目录里的 `wbclean.bat` 双击开菜单，带参数就直接当命令行用：
 
 ```
-wbclean.bat          →  交互式菜单
+wbclean.bat                 →  交互式菜单
+wbclean.bat scan            →  等同 wbclean scan
+wbclean.bat clean --dry-run →  等同 wbclean clean --dry-run
 ```
 
 **卸载**：删掉 `%LOCALAPPDATA%\wbclean` 目录，再从 PATH 里去掉那一项
@@ -283,6 +285,15 @@ wbclean menu
 
 macOS 上也可以双击解压目录里的 `wbclean.command`。
 Windows 上双击 `wbclean.bat`（装过的话，`%LOCALAPPDATA%\wbclean\wbclean.cmd` 也行）。
+
+两个启动器都带参数转发，没装也能直接当命令用：
+
+```bash
+./wbclean.command scan        # 等同 wbclean scan
+wbclean.bat clean --dry-run   # 等同 wbclean clean --dry-run
+```
+
+不带参数才进菜单 —— 双击时 Windows / Finder 不会传参数，走的正是这条。
 
 ### 常用参数
 
@@ -647,7 +658,7 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 
 | 版本 | 主要变化 |
 | :--- | :--- |
-| **1.5**（2026-11-13 重建） | 修复 `--orphans` 在 macOS 上完全失效：孤儿历史目录的来源路径只靠 `sessions.cwd` 反查和目录名反解，而 macOS 的目录名丢掉了开头的 `/`、分隔符与真实横线无法区分，反解必然返回空；会话记录一旦被删，两条依据同时断，所有历史目录都被误判成「疑似离线」，`--orphans` 报 0 个。新增第三级依据：从历史文件内的 `Workspace Folder` 字段读回路径，并用「编码回去必须等于目录名」自校验，猜错就丢弃。实盘 17 个 / 14.4 MB 从「查不出」变为可正常清理。 |
+| **1.5**（2026-11-26 重建） | 修两个启动器的参数转发：`wbclean.bat` / `wbclean.command` 以前把 `menu` 写死、从不转发 `%*` / `$@`，导致解压后不安装、直接在命令行跑 `wbclean.bat scan` 一律弹交互菜单。现在有参数走命令行（不清屏、不等按键、退出码原样返回），没参数（双击）才进菜单。修复 `--orphans` 在 macOS 上完全失效：孤儿历史目录的来源路径只靠 `sessions.cwd` 反查和目录名反解，而 macOS 的目录名丢掉了开头的 `/`、分隔符与真实横线无法区分，反解必然返回空；会话记录一旦被删，两条依据同时断，所有历史目录都被误判成「疑似离线」，`--orphans` 报 0 个。新增第三级依据：从历史文件内的 `Workspace Folder` 字段读回路径，并用「编码回去必须等于目录名」自校验，猜错就丢弃。实盘 17 个 / 14.4 MB 从「查不出」变为可正常清理。 |
 | **1.5**（2026-11-09） | 新增插件治理：`plugins` 子命令扫描插件缓存，清理升级后留下的旧版本目录（实测可回收上百 MB），支持按插件名禁用 / 启用 / 连缓存一起删。旧版本判定优先用应用自带的 `.orphaned_at` 标记，读不到时退回清单比对，在用版本永不删。清理只检查目标文件是否被占用，不必退出应用。`--purge-source` 可连市场源副本一起删。菜单加 12、13 两项。 |
 | **1.4**（2026-11-04） | 识别「仅元数据」工作空间：目录在、但顶层只有 `.workbuddy-ai` 这类隐藏元数据，一个实际文件都没有——旧版只判断「目录在不在」，会把这些一直留在侧边栏。新增 `clean --metadata-only` 连目录一起清，菜单加第 5 项。Windows 侧修了三处：隐藏属性判定（`FILE_ATTRIBUTE_HIDDEN`）、元数据目录名（`.workbuddy`）、只读文件删除（`remove_tree`）。 |
 | **1.3**（2026-11-02 重建） | 三处修复：① 疑似离线的条目（外置盘没挂载、网络盘掉线）不再被当成空壳清理，新增 `clean --force` 显式覆盖；② `--keep-days` 改为「含今天的 N 个日历日」，`sandbox/`、`*.old.log` 等非日期条目按 mtime 判断；③ `--db` 不再被 `--app-home` / `WBCLEAN_APP_HOME` 静默覆盖。`--version` 起带构建日期 |
