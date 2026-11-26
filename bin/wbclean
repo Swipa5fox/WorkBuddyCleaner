@@ -502,16 +502,24 @@ def project_dir_for(workspace_path):
     return os.path.join(PROJECTS_DIR, project_dir_key(workspace_path))
 
 
+# WorkBuddy 的工作空间目录名就是时间戳：2026-10-01-15-46-26（也有用下划线的）。
+# 反解目录名时，只有这种形状的尾巴才值得把 - 当成「不是分隔符」。
+TIMESTAMP_DIR_PAT = re.compile(
+    r"^\d{4}[-_]\d{2}[-_]\d{2}[-_]\d{2}[-_]\d{2}[-_]\d{2}$")
+
+
 def path_from_project_key(key, is_win=None):
     """projects 目录名反解回原路径 —— 尽力而为，不能当删除依据。
 
     Windows 上目录名是把 : 和 \\ 都换成 -，但原路径本身也可能带 -，
-    没法唯一还原。做法是从「尽量少合并」开始枚举，取第一个父目录真实存在的
-    组合 —— 真实路径的上级目录必然存在，这个约束足够把 - 挑出来：
+    没法唯一还原。做法是从「尽量少合并」开始枚举，只在有证据时才合并：
 
         c-Users-Administrator-WorkBuddy-2026-10-01-15-46-26
           → C:\\Users\\Administrator\\WorkBuddy\\2026-10-01-15-46-26
           （时间戳里的 - 不能当目录分隔符，否则解出 ...\\2026\\10\\01\\15\\46\\26）
+
+    证据只有两种：整条路径存在，或合并出来的尾巴像时间戳且父目录存在。
+    两条都不成立就退回最保守的拆法，宁可判成「疑似离线」也不瞎猜。
 
     macOS 上目录名丢掉了开头的 /，也无法区分，直接放弃反解。
     """
@@ -530,20 +538,42 @@ def path_from_project_key(key, is_win=None):
     cands = [base + "\\".join(parts[:-k] + ["-".join(parts[-k:])])
              for k in range(1, len(parts))]
     cands.append(naive)
-    # 先看哪个候选真的存在 —— 路径还在时不能靠「父目录存在」去猜
+
+    # 1) 整条路径真的存在 —— 不用猜
     for c in cands:
         if os.path.isdir(c):
             return c
+
+    # 2) 叶子已删，只剩「父目录存在」这点线索。不能见到父目录存在就合并：
+    #    C:\Users 在每台 Windows 上都有，c-Users-foo-My-Project 会被解成
+    #    C:\Users\foo-My-Project，而它的父目录 C:\Users 恰好存在。
+    #    只有合并出来的尾巴长得像时间戳（WorkBuddy 的目录命名）才敢合并。
     for c in cands:
-        if os.path.isdir(os.path.dirname(c)):
+        tail = c.rsplit("\\", 1)[-1]
+        if TIMESTAMP_DIR_PAT.match(tail) and os.path.isdir(os.path.dirname(c)):
             return c
+
+    # 3) 没有任何证据，按最保守的拆法：每个 - 都是分隔符
     return naive
 
 
 # 会话历史里应用自己记下的工作空间路径，形如：
 #   <user_info>\n Workspace Folder: /Users/foo/WorkBuddy AI/x\n Note: ...
 # 这是应用写进去的事实，比从目录名猜可靠。
-WORKSPACE_FOLDER_PAT = re.compile(r"Workspace Folder:\s*([^\n\r\"\\}]+)")
+#
+# 不能把 \ 排除在字符类外：Windows 路径全是反斜杠，排除后只会截出个 "C:"。
+# 也别想用一条正则切干净 —— 文件是 JSON，路径里的 \\ 和换行转义 \n 混在同一行，
+# 干脆先粗抓一段，再把每个 \n 位置都当候选断点，交给回编码校验去筛。
+WORKSPACE_FOLDER_PAT = re.compile(r"Workspace Folder:\s*([^\"\r\n}]+)")
+
+
+def _field_path_candidates(raw):
+    """把「Workspace Folder:」后面的原文切成可能的路径，从长到短。"""
+    yield raw
+    i = raw.find("\\n")
+    while i != -1:
+        yield raw[:i]
+        i = raw.find("\\n", i + 1)
 
 
 def source_path_from_history(project_dir, key, max_lines=60):
@@ -581,13 +611,15 @@ def source_path_from_history(project_dir, key, max_lines=60):
                     m = WORKSPACE_FOLDER_PAT.search(line.replace("\\/", "/"))
                     if not m:
                         continue
-                    cand = m.group(1).strip()
-                    if not cand or not os.path.isabs(cand):
-                        continue
-                    # 自校验：编码回去必须与目录名一致，不一致说明解析错了
-                    if project_dir_key(cand) != key:
-                        continue
-                    return cand
+                    for cand in _field_path_candidates(m.group(1).strip()):
+                        # JSON 里路径的反斜杠是成对转义的，先还原再校验
+                        cand = cand.replace("\\\\", "\\").strip().rstrip("\\/")
+                        if not cand or not os.path.isabs(cand):
+                            continue
+                        # 自校验：编码回去必须与目录名一致，不一致说明解析错了
+                        if project_dir_key(cand) != key:
+                            continue
+                        return cand
         except OSError:
             continue
     return None
