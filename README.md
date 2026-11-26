@@ -1,6 +1,6 @@
 # WorkBuddy Cleaner
 
-![Version](https://img.shields.io/badge/version-1.4-blue.svg)
+![Version](https://img.shields.io/badge/version-1.5-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.7%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
@@ -61,6 +61,8 @@ macOS 和 Windows 用的是**同一份代码**，差别只在数据目录、进�
    9   查看磁盘占用      随时可用，随时能跑
    10  从备份还原        需先退出 WorkBuddy
    11  导出诊断报告      随时可用，反馈问题用
+   12  查看插件占用      随时可用，含旧版本残留
+   13  清理插件旧版本    随时可用，不用退应用
 
    --------------------------------------------------------------
    0   退出
@@ -68,12 +70,14 @@ macOS 和 Windows 用的是**同一份代码**，差别只在数据目录、进�
    请选择（0 退出）:
 ```
 
-**它干三件事**：
+**它干四件事**：
 
 1. **清空壳** —— 删掉数据库里指向已不存在文件夹的那些记录；
 2. **清仅元数据目录** —— 顶层只有 `.workbuddy-ai`（Windows 上是 `.workbuddy`）这类
    隐藏元数据、一个实际文件都没有的工作空间，可选连本地目录一起删；
-3. **清缓存** —— 日志和缓存，应用重启会自己重建；也能深度清掉历史回滚数据。
+3. **清缓存** —— 日志和缓存，应用重启会自己重建；也能深度清掉历史回滚数据；
+4. **清插件旧版本** —— 每次应用升级都会在缓存里留一份旧版插件目录，应用从不回收，
+   通常能攒到上百 MB。见 [插件治理](#插件治理)。
 
 **它不干的事**：不动 WorkBuddy 本体、不动你的文件、不改工作空间内容、
 不碰你上传的图片附件（`blobs`）、不碰会话历史（`projects`）、不碰登录态（`app/session`）。
@@ -257,12 +261,15 @@ wbclean.bat          →  交互式菜单
 | `wbclean scan` | 列出空壳工作空间、僵尸会话 | 否 |
 | `wbclean stats` | 磁盘占用明细 | 否 |
 | `wbclean cache` | 查看缓存与日志占用 | 否 |
+| `wbclean plugins` | 查看插件占用与旧版本残留 | 否 |
 | `wbclean report` | 生成诊断报告 | 否 |
 | `wbclean backup` | 备份数据库 | 否 |
 | `wbclean clean` | 清理空壳条目 | **是** |
 | `wbclean clean --orphans` | 清理不属于任何工作空间的孤儿历史目录 | **是** |
 | `wbclean clean --metadata-only` | 清理仅元数据目录（连本地目录一起删） | **是** |
 | `wbclean cache --clean` | 清理缓存与日志 | **是** |
+| `wbclean plugins --clean` | 清理插件旧版本残留 | 否 |
+| `wbclean plugins --disable` | 禁用插件（不删文件） | 否 |
 | `wbclean restore` | 从备份还原 | **是** |
 | `wbclean menu` | 交互式菜单 | 视所选命令 |
 
@@ -294,6 +301,15 @@ wbclean cache --clean            # 清安全项（日志 + 缓存）
 wbclean cache --clean --dry-run  # 预览会删什么
 wbclean cache --clean --keep-days 3   # 日志保留最近 3 天（含今天）
 wbclean cache --clean --deep     # 连历史回滚数据一起清
+
+# 插件治理
+wbclean plugins                        # 看占用，按插件分组
+wbclean plugins --clean --dry-run      # 预览要删的旧版本
+wbclean plugins --clean                # 清掉全部旧版本残留（回收最多）
+wbclean plugins --clean --only mcp-miora,workbuddy-docx   # 只清这两个
+wbclean plugins --disable mcp-miora    # 禁用插件，不删文件
+wbclean plugins --enable mcp-miora     # 重新启用
+wbclean plugins --purge mcp-miora      # 禁用并删除缓存
 
 # 报告相关
 wbclean report                   # 人读的文本报告
@@ -352,6 +368,68 @@ Windows 上还多一项（Electron 主进程日志另存了一份，不在数据
 ```bash
 wbclean cache --clean --keep-days 7    # 最近一周的日志留着，方便排障
 ```
+
+### 插件治理
+
+WorkBuddy 每次升级都会把新版本插件解压到 `plugins/cache/<市场>/<插件>/<版本>/`，
+**旧版本目录留在原地不删**。用得久了，这些残留会比正在用的版本还占地方 ——
+实测一台机器上 51 个在用插件占 107 MB，69 个旧版本目录占 102 MB。
+
+```bash
+wbclean plugins                        # 按插件分组看占用
+wbclean plugins --clean --dry-run      # 预览
+wbclean plugins --clean                # 执行
+```
+
+**不需退出应用。** 这里查的是「这些文件有没有被进程打开」，不是「数据库有没有被占用」——
+两者不是一回事。应用运行时数据库一直被持有，但旧版本插件目录通常没有任何进程碰它。
+实测：应用开着的情况下清理 69 个旧版本目录、98.8 MB，全程无占用冲突。
+只有真有进程打开目标文件时才会中止，并列出是哪个 PID。
+
+**怎么判断哪份该删。** 优先看应用自己留下的 `.orphaned_at` 标记 ——
+应用在升级后会给被取代的版本目录打上这个文件，这是最权威的判据。读不到标记时
+退回清单比对：`plugins/installed_plugins.json` 里 `installPath` 指向的那个版本是在用版本，
+同级目录里其余的都是残留。
+
+三条硬规矩：
+
+- **在用版本永不可删** —— 清单指向的那份无论多大都跳过；
+- **越界即拒绝** —— 删除前校验目标必须在 `plugins/cache` 内；
+- **只删版本目录** —— 不会动 `plugins/data` 里的插件数据，也不会改任何设置。
+
+#### 禁用插件
+
+有些不想要的插件（比如内置的 `mcp-miora`）留着占空间、还会出现在场景提示词里。
+可以只写禁用标记，不动文件：
+
+```bash
+wbclean plugins --disable mcp-miora    # 写 enabledPlugins=false
+wbclean plugins --enable mcp-miora     # 改回 true
+wbclean plugins --purge mcp-miora      # 禁用 + 删缓存
+wbclean plugins --purge wecom-unified --purge-source   # 连市场源副本一起删
+```
+
+`--disable` 只改 `settings.json` 的 `enabledPlugins`，其余键原样保留，
+写盘前会先序列化校验，坏数据不会落盘。**需要重启 WorkBuddy 才生效。**
+
+> **注意**：内置插件（`@workbuddy-builtin`）的缓存会在新会话初始化时由应用
+> 从安装包里重新部署回来 —— 这是应用自身行为，`--disable` 的标记会保留并继续生效，
+> 但 `--purge` 删掉的目录可能会重新出现。想彻底不用，靠的是禁用标记，不是删文件。
+
+#### 市场源副本（`--purge-source`）
+
+自定义市场装进来时，整包 zip 会被解到 `plugins/marketplaces/<市场>/` 当「源」，
+装好的版本另有一份在 `plugins/cache/`。**同一个插件在磁盘上存了两份**，
+而源里通常还带着全平台二进制。实测 `workbuddy-wecom-unified` 的源光 `bin/`
+就有 41 MB（darwin/linux/win 五套）。
+
+```bash
+wbclean plugins                         # 只读模式下会列出各市场源占用
+wbclean plugins --purge wecom-unified --purge-source
+```
+
+删源不影响已装插件，但重装时要重新下载。`--purge-source` 必须配合 `--purge` 用，
+单给不会生效。
 
 ### 自定义数据目录
 
@@ -569,6 +647,8 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 
 | 版本 | 主要变化 |
 | :--- | :--- |
+| **1.5**（2026-11-13 重建） | 修复 `--orphans` 在 macOS 上完全失效：孤儿历史目录的来源路径只靠 `sessions.cwd` 反查和目录名反解，而 macOS 的目录名丢掉了开头的 `/`、分隔符与真实横线无法区分，反解必然返回空；会话记录一旦被删，两条依据同时断，所有历史目录都被误判成「疑似离线」，`--orphans` 报 0 个。新增第三级依据：从历史文件内的 `Workspace Folder` 字段读回路径，并用「编码回去必须等于目录名」自校验，猜错就丢弃。实盘 17 个 / 14.4 MB 从「查不出」变为可正常清理。 |
+| **1.5**（2026-11-09） | 新增插件治理：`plugins` 子命令扫描插件缓存，清理升级后留下的旧版本目录（实测可回收上百 MB），支持按插件名禁用 / 启用 / 连缓存一起删。旧版本判定优先用应用自带的 `.orphaned_at` 标记，读不到时退回清单比对，在用版本永不删。清理只检查目标文件是否被占用，不必退出应用。`--purge-source` 可连市场源副本一起删。菜单加 12、13 两项。 |
 | **1.4**（2026-11-04） | 识别「仅元数据」工作空间：目录在、但顶层只有 `.workbuddy-ai` 这类隐藏元数据，一个实际文件都没有——旧版只判断「目录在不在」，会把这些一直留在侧边栏。新增 `clean --metadata-only` 连目录一起清，菜单加第 5 项。Windows 侧修了三处：隐藏属性判定（`FILE_ATTRIBUTE_HIDDEN`）、元数据目录名（`.workbuddy`）、只读文件删除（`remove_tree`）。 |
 | **1.3**（2026-11-02 重建） | 三处修复：① 疑似离线的条目（外置盘没挂载、网络盘掉线）不再被当成空壳清理，新增 `clean --force` 显式覆盖；② `--keep-days` 改为「含今天的 N 个日历日」，`sandbox/`、`*.old.log` 等非日期条目按 mtime 判断；③ `--db` 不再被 `--app-home` / `WBCLEAN_APP_HOME` 静默覆盖。`--version` 起带构建日期 |
 | **1.3** | **支持 Windows**（与 macOS 同一份代码，发布包分开）；新增孤儿历史目录清理 `clean --orphans`；`clean` 结束时写 `deleted.json` 删除清单；备份目录跟随 `--app-home`；菜单扩到 10 项 |
