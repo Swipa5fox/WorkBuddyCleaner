@@ -6,10 +6,13 @@
 
 cd "$(dirname "$0")" || exit 1
 
-if command -v wbclean >/dev/null 2>&1; then
-    WBCLEAN=$(command -v wbclean)
-elif [ -x "./bin/wbclean" ]; then
+# 找解释器的顺序：包内自带 → PATH → 家目录。
+# 包内那份必须优先 —— 启动器就躺在包里，用户解压了新版却跑起旧版安装，
+# 是最容易误判「我改了怎么没用」的坑。PATH 里那份只在包不完整时兜底。
+if [ -x "./bin/wbclean" ]; then
     WBCLEAN="./bin/wbclean"
+elif command -v wbclean >/dev/null 2>&1; then
+    WBCLEAN=$(command -v wbclean)
 elif [ -x "$HOME/.local/bin/wbclean" ]; then
     WBCLEAN="$HOME/.local/bin/wbclean"
 else

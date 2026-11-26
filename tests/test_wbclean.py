@@ -1454,5 +1454,14 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn("clear", cli_branch)
 
 
+    def test_macos_launcher_prefers_bundled_copy(self):
+        """包内自带的必须优先于 PATH 里已安装的旧版。"""
+        cmd = self._read("wbclean.command").decode("utf-8")
+        bundled = cmd.index('-x "./bin/wbclean"')
+        installed = cmd.index("command -v wbclean")
+        self.assertLess(bundled, installed,
+                        "PATH 里的旧版抢在包内新版前面了")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
