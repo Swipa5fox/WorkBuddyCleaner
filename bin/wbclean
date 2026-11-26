@@ -58,10 +58,10 @@ import unicodedata
 import urllib.parse
 from types import SimpleNamespace
 
-VERSION = "1.4"
+VERSION = "1.5"
 # 同一个版本号可能被重新构建过（修 bug 但不改对外版本），
 # 带上构建日期，用户反馈问题时才能分清跑的是哪一版。
-BUILD = "2026-11-08"
+BUILD = "2026-11-26"
 
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
@@ -373,6 +373,51 @@ def require_app_closed(db_path=None, skip=False):
     print(C_OK + "  检查通过：应用已退出，数据库未被占用" + C_0)
 
 
+def files_in_use(paths):
+    """找出被任何进程打开的文件，返回 [(进程名, 路径)]。
+
+    插件缓存和数据库不一样：数据库被 Electron 持着句柄时不能动，
+    但插件缓存里的旧版本目录通常没有任何进程打开它 —— 应用已经切到新版本了。
+    用「数据库被占」来一刀切地拦住插件清理属于误伤，所以这里直接查文件本身。
+
+    macOS / Linux 走 lsof；Windows 上 lsof 不可用，返回空表示「未检出」，
+    由调用方按平台决定是放行还是保守处理。
+    """
+    if IS_WIN or not paths:
+        return []
+    try:
+        proc = subprocess.run(
+            ["lsof", "-F", "pn"] + list(paths),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    hits = []
+    name, is_pid = None, False
+    for raw in proc.stdout.decode("utf-8", "replace").splitlines():
+        if raw.startswith("p"):
+            name, is_pid = raw[1:], True
+        elif raw.startswith("n") and is_pid:
+            hits.append((name, raw[1:]))
+    return hits
+
+
+def require_files_released(paths, what="这些目录"):
+    """确认目标路径没有被进程持有。有占用才中止，没占用就放行。"""
+    if IS_WIN:
+        print(C_OK + "  检查通过：Windows 下跳过文件占用检查" + C_0)
+        return
+    hits = files_in_use(paths)
+    if hits:
+        print(C_ERR + "  %s正被进程占用：" % what + C_0)
+        for pid, path in hits[:8]:
+            print("    - PID %s：%s" % (pid, path))
+        if len(hits) > 8:
+            print("    " + C_DIM + "… 另有 %d 项" % (len(hits) - 8) + C_0)
+        die("请先完全退出 WorkBuddy 后重试。")
+    print(C_OK + "  检查通过：目标目录未被任何进程占用" + C_0)
+
+
 # ============================================================ 工具函数
 
 def human_size(num):
@@ -493,6 +538,59 @@ def path_from_project_key(key, is_win=None):
         if os.path.isdir(os.path.dirname(c)):
             return c
     return naive
+
+
+# 会话历史里应用自己记下的工作空间路径，形如：
+#   <user_info>\n Workspace Folder: /Users/foo/WorkBuddy AI/x\n Note: ...
+# 这是应用写进去的事实，比从目录名猜可靠。
+WORKSPACE_FOLDER_PAT = re.compile(r"Workspace Folder:\s*([^\n\r\"\\}]+)")
+
+
+def source_path_from_history(project_dir, key, max_lines=60):
+    """从 projects 下的会话历史里读回工作空间真实路径。
+
+    存在的理由：判断孤儿历史目录时，前两级依据都会断。
+      - 目录名反解在 macOS 上必然失败 —— key 丢了开头的 /，且分隔符
+        转出来的 - 和路径里真有的横线长得一模一样，无从还原；
+      - sessions.cwd 会随会话记录一起被删掉，历史目录还躺着时就查不到。
+    两路都断的时候，这条是唯一能证明「这个历史目录原本指向哪儿」的证据。
+
+    只在能自校验时才采信：读回来的路径必须重新编码成同一个 projects
+    目录名，否则丢弃。这挡住「用户往对话里粘贴过 Workspace Folder 字样」
+    之类的误匹配 —— 猜错一个目录名就可能删错整份会话历史，不能松。
+    """
+    if not os.path.isdir(project_dir):
+        return None
+    try:
+        names = sorted(n for n in os.listdir(project_dir)
+                       if n.endswith(".jsonl"))
+    except OSError:
+        return None
+
+    for name in names:
+        full = os.path.join(project_dir, name)
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                # 只扫开头若干行：目标字段就在首条 user 消息里，
+                # 而单个 jsonl 可能几百 MB，整读不划算。
+                for i, line in enumerate(fh):
+                    if i >= max_lines:
+                        break
+                    if "Workspace Folder:" not in line:
+                        continue
+                    m = WORKSPACE_FOLDER_PAT.search(line.replace("\\/", "/"))
+                    if not m:
+                        continue
+                    cand = m.group(1).strip()
+                    if not cand or not os.path.isabs(cand):
+                        continue
+                    # 自校验：编码回去必须与目录名一致，不一致说明解析错了
+                    if project_dir_key(cand) != key:
+                        continue
+                    return cand
+        except OSError:
+            continue
+    return None
 
 
 def safe_under(path, parent):
@@ -832,13 +930,20 @@ def collect(conn, verify=True):
 def find_orphan_projects(conn):
     """找出 projects 下不属于任何现役工作空间的历史目录。
 
-    这是 Windows 上磁盘占用的真正大头：任务删了、工作空间记录也没了，
+    这是磁盘占用的真正大头：任务删了、工作空间记录也没了，
     但 projects 下那份会话历史原样躺着，几百 MB 很常见。
 
     判定链（每一步都要过）：
       1. 目录名不在 workspaces 的 key 集合里 —— 不是现役工作空间；
-      2. 用 sessions.cwd 反查它的真实路径（查不到才退回目录名反解）；
+      2. 反查它的真实路径，三级依次尝试：
+         a. sessions.cwd —— 会话记录还在时最直接；
+         b. 历史文件里记的 Workspace Folder —— 会话记录删了但历史还在时靠它；
+         c. 目录名反解 —— 仅 Windows 可能，且不可靠；
       3. 真实路径仍然存在 —— 说明只是换了入口在用，不动。
+
+    第 2 步漏掉任何一级，都会让本来能判定的历史目录退化成一堆
+    「疑似离线、保留不动」—— macOS 上尤其明显，因为反解那一路
+    永远是空的。
     """
     if not os.path.isdir(PROJECTS_DIR):
         return []
@@ -862,7 +967,16 @@ def find_orphan_projects(conn):
             continue
         if name in ws_keys:
             continue
-        real = key_to_path.get(name) or path_from_project_key(name)
+
+        real = key_to_path.get(name)
+        origin = "sessions"
+        if not real:
+            real = source_path_from_history(full, name)
+            origin = "history"
+        if not real:
+            real = path_from_project_key(name)
+            origin = "key"
+
         # 和空壳判定同一套口径：目标目录只是「此刻不可达」时不能删历史
         state, reason = (classify_workspace_path(real) if real
                          else ("suspect", "无法从目录名反解源路径"))
@@ -871,6 +985,7 @@ def find_orphan_projects(conn):
             "dir": full,
             "size": dir_size(full),
             "source_path": real,
+            "source_origin": origin if real else None,
             "source_exists": state == "alive",
             "source_state": state,
             "source_reason": reason,
@@ -2040,6 +2155,556 @@ def cmd_cache(args):
     print()
 
 
+# ============================================================ 插件治理
+
+# 插件版本会在升级时整份留在缓存里，旧版本不会被自动回收。
+# 应用自己会给这些目录打一个 .orphaned_at 标记 —— 这是最权威的判据，
+# 优先用它；读不到标记时再退回「不在 installed_plugins 记录里」的推断。
+
+PLUGIN_MANIFEST_DIRS = (".codebuddy-plugin", ".workbuddy-plugin")
+
+
+def plugins_root():
+    """插件缓存根目录。跟着 APP_HOME 走，--app-home 指到别处时才能一起指。"""
+    return os.path.join(APP_HOME, "plugins")
+
+
+def installed_plugins_path():
+    return os.path.join(plugins_root(), "installed_plugins.json")
+
+
+def settings_path():
+    return os.path.join(APP_HOME, "settings.json")
+
+
+def load_json_file(path, default=None):
+    """读 JSON。文件不存在或内容坏掉时返回 default，不抛异常。
+
+    这两个清单是应用自己在写的，读失败时工具应当降级而不是崩溃 ——
+    扫描类命令在清单损坏时仍然要能列出目录和体积。
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def load_installed_plugins():
+    """返回 {插件键: set(在用版本目录名)}，键形如 name@marketplace。"""
+    data = load_json_file(installed_plugins_path(), {}) or {}
+    out = {}
+    for key, items in (data.get("plugins") or {}).items():
+        versions = set()
+        for item in items or []:
+            install_path = (item or {}).get("installPath") or ""
+            if install_path:
+                versions.add(os.path.basename(install_path.rstrip("/\\")))
+        out[key] = versions
+    return out
+
+
+def load_enabled_plugins():
+    data = load_json_file(settings_path(), {}) or {}
+    return dict(data.get("enabledPlugins") or {})
+
+
+def read_orphan_marker(version_path):
+    """读 .orphaned_at 标记。有标记说明应用自己已判定这份是旧版本。
+
+    返回标记内容（多半是时间戳）或 None。文件存在但为空也算命中。
+    """
+    for name in (".orphaned_at",):
+        full = os.path.join(version_path, name)
+        if os.path.exists(full):
+            try:
+                with open(full, "r", encoding="utf-8", errors="replace") as f:
+                    return f.read().strip() or "(空)"
+            except OSError:
+                return "(不可读)"
+    return None
+
+
+def scan_plugins():
+    """扫描插件缓存，按「在用 / 孤儿 / 未登记」三态归类每个版本目录。
+
+    返回 (rows, summary)。每行描述一个插件的一项版本，字段：
+        key/plugin/marketplace/version/path/size/state/enabled/live_versions
+    state 取值：
+        live    清单记录指向的当前版本
+        orphan  带 .orphaned_at 标记，或不是清单记录的当前版本
+        stale   目录存在但清单里没有这个插件（可能是卸载残留）
+    """
+    root = os.path.join(plugins_root(), "cache")
+    installed = load_installed_plugins()
+    enabled = load_enabled_plugins()
+
+    rows = []
+    if not os.path.isdir(root):
+        return rows, {"live": 0, "orphan": 0, "stale": 0,
+                      "live_size": 0, "orphan_size": 0, "stale_size": 0}
+
+    for marketplace in sorted(os.listdir(root)):
+        mdir = os.path.join(root, marketplace)
+        if not os.path.isdir(mdir) or os.path.islink(mdir):
+            continue
+        for plugin in sorted(os.listdir(mdir)):
+            pdir = os.path.join(mdir, plugin)
+            if not os.path.isdir(pdir) or os.path.islink(pdir):
+                continue
+            key = "%s@%s" % (plugin, marketplace)
+            live_versions = installed.get(key, set())
+            for version in sorted(os.listdir(pdir)):
+                vdir = os.path.join(pdir, version)
+                if not os.path.isdir(vdir) or os.path.islink(vdir):
+                    continue
+                marker = read_orphan_marker(vdir)
+                if version in live_versions:
+                    state = "live"
+                elif marker is not None:
+                    state = "orphan"
+                elif live_versions:
+                    state = "orphan"      # 有在用版本但这份不是，按残留处理
+                else:
+                    state = "stale"       # 整个插件都不在清单里
+                rows.append({
+                    "key": key,
+                    "plugin": plugin,
+                    "marketplace": marketplace,
+                    "version": version,
+                    "path": vdir,
+                    "size": entry_size(vdir),
+                    "state": state,
+                    "marker": marker,
+                    "enabled": enabled.get(key),
+                    "live_versions": live_versions,
+                })
+
+    summary = {"live": 0, "orphan": 0, "stale": 0,
+               "live_size": 0, "orphan_size": 0, "stale_size": 0}
+    for r in rows:
+        summary[r["state"]] += 1
+        summary[r["state"] + "_size"] += r["size"]
+    return rows, summary
+
+
+def removable_plugin_rows(rows):
+    """可清理的行：孤儿与未登记残留。在用版本永远不在此列。"""
+    return [r for r in rows if r["state"] in ("orphan", "stale")]
+
+
+def update_enabled_plugins(changes):
+    """按 {插件键: bool} 改写 settings.json 里的 enabledPlugins。
+
+    只动 enabledPlugins 里被点名的键，其余内容原样写回（2 空格缩进、
+    保持原键顺序）。写前把改好的内容先序列化一遍，确保是合法 JSON，
+    再落盘 —— settings.json 坏了会影响应用启动。
+    """
+    path = settings_path()
+    if not os.path.exists(path):
+        raise IOError("找不到 settings.json：%s" % path)
+
+    data = load_json_file(path, None)
+    if not isinstance(data, dict):
+        raise IOError("settings.json 不是合法 JSON 对象，已中止以免损坏：%s" % path)
+
+    current = data.get("enabledPlugins")
+    if not isinstance(current, dict):
+        current = {}
+        data["enabledPlugins"] = current
+    current.update(changes)
+
+    # 先序列化校验，再落盘。separators 保持与 python -m json.tool 一致的观感。
+    text = json.dumps(data, ensure_ascii=False, indent=2, separators=(",", ": "))
+    json.loads(text)                     # 坏数据在这里就会抛，不会写进去
+
+    tmp = path + ".wbclean.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text + "\n")
+    shutil.move(tmp, path)
+    return len(changes)
+
+
+def remove_plugin_version(path, root):
+    """删除单个版本目录。带越界护栏与 Windows 只读位兼容。"""
+    if not safe_under(path, root):
+        raise IOError("拒绝删除（不在插件缓存目录内）：%s" % path)
+    remove_tree(path)
+
+
+def _plugin_table(rows, show_versions=True):
+    """把 {插件键: 若干版本行} 渲染成对齐的表格行。
+
+    插件键最长能到 50 多列（skill-wecom-forwarded-chat-resources@...），
+    写死列宽会让后面的体积数字整体错位，所以按本批实际最大宽度算。
+    """
+    grouped = {}
+    for r in rows:
+        grouped.setdefault(r["key"], []).append(r)
+    ordered = sorted(grouped.items(),
+                     key=lambda kv: -sum(x["size"] for x in kv[1]))
+    width = max([dw(k) for k, _v in ordered] + [10])
+
+    lines = []
+    for key, items in ordered:
+        total = sum(x["size"] for x in items)
+        tail = ""
+        if show_versions:
+            vers = "、".join(_short_version(x["version"]) for x in items)
+            tail = "   " + C_DIM + vers + C_0
+        lines.append("    %s %10s%s"
+                     % (pad(key, width), human_size(total), tail))
+    return lines, width
+
+
+def marketplace_source_path(marketplace):
+    """市场源目录：plugins/marketplaces/<市场>。
+
+    自定义市场（如 workbuddy-wecom-unified）会把整包 zip 解到这里当「源」，
+    其中 plugin/bin 常带全平台二进制，几十 MB。装到 plugins/cache 之后这份源
+    仍然留着，等于同一个插件在磁盘上存两份。删掉它不影响已装版本，
+    需要重装时应用会从源地址重新下载。
+    """
+    return os.path.join(plugins_root(), "marketplaces", marketplace)
+
+
+def marketplace_source_size(marketplace):
+    p = marketplace_source_path(marketplace)
+    return entry_size(p) if os.path.isdir(p) else 0
+
+
+def cmd_plugins(args):
+    """查看插件占用、清理旧版本残留、禁用 / 启用插件。"""
+    rows, summary = scan_plugins()
+    root = os.path.join(plugins_root(), "cache")
+
+    if not rows:
+        print()
+        hr("═")
+        print(C_B + "  插件治理" + C_0)
+        hr("═")
+        print("\n  没有找到插件缓存目录：%s" % root)
+        print("  " + C_DIM + "（应用没装过插件，或数据目录指错了）" + C_0 + "\n")
+        return
+
+    # ---------- 禁用 / 启用 / 清理指定插件（写操作，独立于批量清理）
+    # 注意三个都要判：只给 --purge 时也要走这条，否则会掉进只读分支什么都不做。
+    if (getattr(args, "disable", None) or getattr(args, "enable", None)
+            or getattr(args, "purge", None)):
+        return _cmd_plugins_toggle(args, rows)
+
+    # ---------- 只读：展示
+    if not args.clean:
+        print()
+        hr("═")
+        print(C_B + "  插件治理" + C_0)
+        hr("═")
+        print("\n  插件缓存 %s%s%s" % (C_DIM, root, C_0))
+
+        live_rows = [r for r in rows if r["state"] == "live"]
+        dead_rows = removable_plugin_rows(rows)
+
+        print("\n  " + C_OK + "在用版本" + C_0 + "（不会被清理，共 %d 份）"
+              % len(live_rows))
+        by_plugin = {}
+        for r in live_rows:
+            rec = by_plugin.setdefault(r["key"], {"size": 0, "version": r["version"]})
+            rec["size"] += r["size"]
+        lines, w = _plugin_table(live_rows)
+        for line in lines[:12]:
+            print(line)
+        if len(by_plugin) > 12:
+            print("    " + C_DIM + "… 另有 %d 个插件" % (len(by_plugin) - 12) + C_0)
+
+        print("\n  " + C_WARN + "旧版本残留" + C_0 + "（可清理）")
+        dead_lines, w2 = _plugin_table(dead_rows)
+        dead_grouped = {}
+        for r in dead_rows:
+            dead_grouped.setdefault(r["key"], []).append(r)
+        for line in dead_lines[:12]:
+            print(line)
+        if len(dead_grouped) > 12:
+            print("    " + C_DIM + "… 另有 %d 个插件" % (len(dead_grouped) - 12) + C_0)
+        print("    %s %10s" % ("─" * w2, "─" * 8))
+        print("    %s %10s" % (pad("合计 %d 个目录" % len(dead_rows), w2),
+                               human_size(summary["orphan_size"] + summary["stale_size"])))
+
+        # 已禁用但仍有缓存的插件：写禁用标记不会删缓存，这里点明
+        disabled = []
+        for key, rec in sorted(by_plugin.items()):
+            state = enabled_state_of(rows, key)
+            if state is False:
+                disabled.append((key, rec["size"]))
+        if disabled:
+            print("\n  " + C_DIM + "已禁用（缓存保留，可用 --purge 连缓存一起删）" + C_0)
+            for key, size in disabled:
+                print("    %-44s %10s" % (key, human_size(size)))
+
+        # 自定义市场的源副本：同一插件在 marketplaces/ 下还存着一份
+        sources = []
+        for mp in sorted({r["marketplace"] for r in rows}):
+            size = marketplace_source_size(mp)
+            if size > 0:
+                sources.append((mp, size))
+        if sources:
+            print("\n  " + C_WARN + "市场源副本" + C_0
+                  + "（与缓存重复，可加 --purge-source 一起删）")
+            for mp, size in sorted(sources, key=lambda kv: -kv[1]):
+                print("    %-44s %10s" % (mp, human_size(size)))
+
+        print()
+        print("  可释放：%s（旧版本残留）" % human_size(
+            summary["orphan_size"] + summary["stale_size"]))
+        print()
+        print("  " + C_B + "常用命令" + C_0)
+        print("    wbclean plugins --clean --dry-run      先看会删什么")
+        print("    wbclean plugins --clean                清掉全部旧版本残留")
+        print("    wbclean plugins --disable mcp-miora    禁用某个插件")
+        print("    wbclean plugins --enable mcp-miora     重新启用")
+        print("    wbclean plugins --purge mcp-miora      禁用并删除它的缓存")
+        print()
+        return
+
+    # ---------- 写入：清理旧版本
+    print()
+    hr("═")
+    print(C_B + "  清理插件旧版本" + C_0)
+    hr("═")
+    print("\n  插件缓存 %s%s%s" % (C_DIM, root, C_0))
+
+    selected = removable_plugin_rows(rows)
+    if getattr(args, "only", None):
+        wanted = {x.strip().lower() for x in args.only.split(",") if x.strip()}
+        selected = [r for r in selected if r["plugin"].lower() in wanted]
+
+    selected = [r for r in selected if r["size"] >= 0 and os.path.isdir(r["path"])]
+    if not selected:
+        print("\n  " + C_OK + "没有可清理的旧版本残留。" + C_0 + "\n")
+        return
+
+    total = sum(r["size"] for r in selected)
+    print("\n  将删除 %d 个旧版本目录：" % len(selected))
+    lines, w = _plugin_table(selected)
+    for line in lines:
+        print(line)
+    print("    %s %10s" % ("─" * w, "─" * 8))
+    print("    %s %10s" % (pad("合计", w), human_size(total)))
+
+    if args.dry_run:
+        print("\n" + C_WARN + "[预览模式] 未删除任何内容。" + C_0 + "\n")
+        return
+
+    print("\n[1/2] 检查运行状态 ...")
+    if getattr(args, "skip_process_check", False):
+        print(C_WARN + "  已跳过运行状态检查（仅自测用）" + C_0)
+    else:
+        # 插件缓存不依赖数据库：应用开着也能删旧版本，只要没有进程打开这些文件。
+        # 用「数据库被占」一刀切会误伤 —— 实测应用运行时旧版本目录零占用。
+        require_files_released([r["path"] for r in selected])
+
+    if not args.yes:
+        print()
+        print("  " + C_WARN + "这些是升级后留下的旧版本，当前版本不受影响。" + C_0)
+        print("  删除后无法回滚到旧版本，但正在用的插件功能不变。")
+        print()
+        try:
+            answer = input("  输入 yes 执行，其他任意键取消: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n  已取消。\n")
+            return
+        if answer != "yes":
+            print("\n  已取消，未做任何修改。\n")
+            return
+
+    print("\n[2/2] 删除 ...")
+    freed_total = 0
+    failed = 0
+    for r in selected:
+        try:
+            remove_plugin_version(r["path"], root)
+            freed_total += r["size"]
+        except (OSError, IOError) as e:
+            failed += 1
+            print("    " + C_WARN + "跳过 %s：%s" % (r["key"], e) + C_0)
+
+    print()
+    hr("═")
+    print(C_B + "  完成" + C_0 + "，共释放 " + C_OK + human_size(freed_total) + C_0)
+    hr("═")
+    if failed:
+        print("  " + C_WARN + "%d 个目录删除失败，见上方提示。" % failed + C_0)
+    print("  插件功能不受影响，下次应用启动不会重新生成旧版本。")
+    print()
+
+
+def enabled_state_of(rows, key):
+    """从扫描结果里取某个插件的启用状态。None 表示设置里没有显式声明。"""
+    for r in rows:
+        if r["key"] == key:
+            return r["enabled"]
+    return None
+
+
+def _short_version(version, width=22):
+    """版本号太长时截断，免得把表格撑破。"""
+    if len(version) <= width:
+        return version
+    return version[:width - 1] + "…"
+
+
+def resolve_plugin_key(rows, name):
+    """把用户给的名字解析成完整插件键。
+
+    允许只写插件名（mcp-miora）、也允许写全键（mcp-miora@workbuddy-builtin）。
+    只写名字且命中多个市场时要求写全，避免误改。
+    """
+    name = name.strip()
+    keys = sorted({r["key"] for r in rows})
+    if name in keys:
+        return name
+    matches = [k for k in keys if k.split("@", 1)[0] == name]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError("插件名 %s 有多个来源，请写全：%s"
+                         % (name, "、".join(matches)))
+    # 缓存里没有但清单里登记过的情况也允许改设置
+    return None
+
+
+def _cmd_plugins_toggle(args, rows):
+    """禁用 / 启用 / 禁用并删缓存。"""
+    names = list(args.disable or []) + list(args.enable or []) + list(args.purge or [])
+    want = True if args.enable else False
+
+    print()
+    hr("═")
+    print(C_B + ("  启用插件" if want else "  禁用插件") + C_0)
+    hr("═")
+
+    changes = {}
+    unknown = []
+    for name in names:
+        key = resolve_plugin_key(rows, name)
+        if key is None:
+            unknown.append(name)
+            continue
+        changes[key] = want
+
+    if unknown:
+        print("\n  " + C_ERR + "找不到这些插件：" + "、".join(unknown) + C_0)
+        print("  " + C_DIM + "名字要和缓存目录一致，可用 wbclean plugins 查看" + C_0 + "\n")
+        if not changes:
+            return
+
+    print("\n  将写入 settings.json：")
+    for key, val in sorted(changes.items()):
+        print("    %-44s %s" % (key, C_OK + "true" + C_0 if val
+                                else C_WARN + "false" + C_0))
+
+    # --purge 会删文件，删除范围必须在动手前让用户看见（含 dry-run）
+    purge_plan = []
+    if args.purge:
+        cache_root = os.path.join(plugins_root(), "cache")
+        for name in args.purge:
+            key = resolve_plugin_key(rows, name)
+            if not key:
+                continue
+            plugin, marketplace = key.split("@", 1)
+            cache_hits = [r for r in rows
+                          if r["plugin"] == plugin and r["marketplace"] == marketplace]
+            if cache_hits:
+                purge_plan.append(("缓存 %d 个版本  %s"
+                                   % (len(cache_hits), plugin),
+                                   sum(r["size"] for r in cache_hits)))
+            if getattr(args, "purge_source", False):
+                size = marketplace_source_size(marketplace)
+                if size:
+                    purge_plan.append(("市场源副本  %s" % marketplace, size))
+
+    if purge_plan:
+        print("\n  " + C_WARN + "同时删除：" + C_0)
+        for label, size in purge_plan:
+            print("    %-44s %10s" % (label, human_size(size)))
+        print("    " + C_DIM + "市场源删掉后，重装该插件需要重新下载。" + C_0)
+
+    if args.dry_run:
+        print("\n" + C_WARN + "[预览模式] 未修改任何内容。" + C_0 + "\n")
+        return
+
+    if not args.yes:
+        print()
+        print("  " + C_DIM + "只改启用状态，不动插件文件。重启 WorkBuddy 生效。"
+              + C_0)
+        print()
+        try:
+            answer = input("  输入 yes 执行，其他任意键取消: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n  已取消。\n")
+            return
+        if answer != "yes":
+            print("\n  已取消，未做任何修改。\n")
+            return
+
+    try:
+        update_enabled_plugins(changes)
+    except (OSError, IOError) as e:
+        print("\n  " + C_ERR + "写入失败：%s" % e + C_0 + "\n")
+        return
+
+    print("\n  " + C_OK + "已写入 %d 项设置。" % len(changes) + C_0)
+
+    # --purge：禁用后再把缓存删掉
+    if args.purge:
+        root = os.path.join(plugins_root(), "cache")
+        purged = 0
+        freed = 0
+        for name in args.purge:
+            key = resolve_plugin_key(rows, name)
+            if not key:
+                continue
+            plugin, marketplace = key.split("@", 1)
+            for r in rows:
+                if r["plugin"] != plugin or r["marketplace"] != marketplace:
+                    continue
+                try:
+                    remove_plugin_version(r["path"], root)
+                    freed += r["size"]
+                    purged += 1
+                except (OSError, IOError) as e:
+                    print("    " + C_WARN + "跳过 %s：%s" % (r["path"], e) + C_0)
+            # 版本目录清空后，父目录也一起收掉
+            pdir = os.path.join(root, marketplace, plugin)
+            try:
+                if os.path.isdir(pdir) and not os.listdir(pdir):
+                    os.rmdir(pdir)
+            except OSError:
+                pass
+
+            # 市场源副本：同一个插件在 marketplaces/ 下还存着一份解包内容
+            if getattr(args, "purge_source", False):
+                src = marketplace_source_path(marketplace)
+                if os.path.isdir(src):
+                    size = entry_size(src)
+                    try:
+                        remove_plugin_version(src,
+                                              os.path.join(plugins_root(),
+                                                           "marketplaces"))
+                        freed += size
+                        print("    %-44s %10s   %s"
+                              % (marketplace + " (市场源)", human_size(size),
+                                 C_DIM + "重装时需重新下载" + C_0))
+                    except (OSError, IOError) as e:
+                        print("    " + C_WARN + "跳过市场源 %s：%s"
+                              % (marketplace, e) + C_0)
+
+        print("  已删除 %d 个缓存目录，释放 %s。"
+              % (purged, human_size(freed)))
+        print("  " + C_DIM + "应用若在本会话重部署，缓存会重新出现；"
+              "禁用标记仍然生效。" + C_0)
+    print()
+
+
 # ============================================================ 命令：menu
 
 # (编号, 名称, 状态标签, 标签颜色, 补充说明)
@@ -2055,6 +2720,8 @@ MENU_ITEMS = [
     ("9", "查看磁盘占用", "随时可用", C_OK, "，随时能跑"),
     ("10", "从备份还原", "需先退出", C_WARN, " WorkBuddy"),
     ("11", "导出诊断报告", "随时可用", C_OK, "，反馈问题用"),
+    ("12", "查看插件占用", "随时可用", C_OK, "，含旧版本残留"),
+    ("13", "清理插件旧版本", "随时可用", C_OK, "，不用退应用"),
 ]
 
 MENU_RULE = 62
@@ -2109,6 +2776,12 @@ def cmd_menu(args):
         "9": (cmd_stats, lambda: SimpleNamespace(db=args.db)),
         "11": (cmd_report, lambda: SimpleNamespace(db=args.db, format="text",
                                                    output=None)),
+        "12": (cmd_plugins, lambda: SimpleNamespace(
+            db=args.db, clean=False, only=None, disable=None, enable=None,
+            purge=None, purge_source=False, dry_run=False, yes=True)),
+        "13": (cmd_plugins, lambda: SimpleNamespace(
+            db=args.db, clean=True, only=None, disable=None, enable=None,
+            purge=None, purge_source=False, dry_run=False, yes=False)),
     }
 
     while True:
@@ -2226,6 +2899,23 @@ def build_parser():
     sp.add_argument("--dry-run", action="store_true", help="只预览，不删除")
     sp.add_argument("--yes", action="store_true", help="跳过交互确认")
     sp.set_defaults(func=cmd_cache)
+
+    sp = sub.add_parser("plugins", help="插件治理：清理旧版本、禁用 / 启用插件")
+    sp.add_argument("--clean", action="store_true",
+                    help="清理旧版本残留（默认只显示占用）")
+    sp.add_argument("--only", metavar="NAME",
+                    help="只清理指定插件，逗号分隔（如 mcp-miora,wecom-unified）")
+    sp.add_argument("--disable", action="append", metavar="NAME",
+                    help="禁用插件（可重复；写 enabledPlugins=false，不删文件）")
+    sp.add_argument("--enable", action="append", metavar="NAME",
+                    help="重新启用插件（可重复）")
+    sp.add_argument("--purge", action="append", metavar="NAME",
+                    help="禁用插件并删除它的缓存目录（可重复）")
+    sp.add_argument("--purge-source", action="store_true",
+                    help="配合 --purge：连市场源副本（marketplaces/）一起删")
+    sp.add_argument("--dry-run", action="store_true", help="只预览，不写入")
+    sp.add_argument("--yes", action="store_true", help="跳过交互确认")
+    sp.set_defaults(func=cmd_plugins)
 
     return p
 
