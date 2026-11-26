@@ -1483,5 +1483,32 @@ class LauncherTests(unittest.TestCase):
                         "PATH 里的旧版抢在包内新版前面了")
 
 
+    def test_windows_launcher_runs_cli_when_given_args(self):
+        """真的跑一遍 .bat：带参数必须走 CLI，不能弹菜单。"""
+        if not mod.IS_WIN:
+            self.skipTest("只在 Windows 上能跑 .bat")
+        proc = subprocess.run(
+            ["cmd", "/c", os.path.join(self.root, "wbclean.bat"), "--version"],
+            cwd=self.root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+        text = proc.stdout.decode("utf-8", "replace")
+        self.assertEqual(proc.returncode, 0, text)
+        self.assertIn("wbclean", text)
+        self.assertNotIn("请选择", text, "弹了菜单 —— 参数没转发到 CLI")
+
+    def test_macos_launcher_runs_cli_when_given_args(self):
+        """真的跑一遍 .command：带参数必须走 CLI，不能弹菜单。"""
+        if not mod.IS_MAC:
+            self.skipTest("只在 macOS 上能跑 .command")
+        proc = subprocess.run(
+            [os.path.join(self.root, "wbclean.command"), "--version"],
+            cwd=self.root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+        text = proc.stdout.decode("utf-8", "replace")
+        self.assertEqual(proc.returncode, 0, text)
+        self.assertIn("wbclean", text)
+        self.assertNotIn("请选择", text, "弹了菜单 —— 参数没转发到 CLI")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
