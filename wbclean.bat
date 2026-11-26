@@ -3,6 +3,8 @@ rem ============================================================
 rem  wbclean launcher (Windows)
 rem
 rem  Double-click this file to open the interactive menu.
+rem  Run it with arguments (wbclean.bat scan / clean --yes ...) and the
+rem  arguments are forwarded straight to the CLI instead.
 rem  Everything user-visible is printed by the Python script,
 rem  so this launcher stays ASCII-only on purpose: a .bat with
 rem  Chinese text inside gets mangled by the OEM code page
@@ -58,6 +60,17 @@ if not defined PY_CMD (
     exit /b 1
 )
 
+rem ---- Arguments given? Forward them to the CLI and keep its exit code.
+rem  Double-clicking passes nothing, so an empty %1 means "open the menu".
+rem  Before this split %* was never forwarded: Python always received the
+rem  literal word "menu", so every command-line invocation just opened the
+rem  menu no matter what the user typed.
+if "%~1"=="" goto :interactive_menu
+
+%PY_CMD% "%WBCLEAN%" %*
+exit /b %ERRORLEVEL%
+
+:interactive_menu
 %PY_CMD% "%WBCLEAN%" menu
 set "RC=%ERRORLEVEL%"
 

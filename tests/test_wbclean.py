@@ -1417,5 +1417,42 @@ class MarketplaceSourceTests(unittest.TestCase):
             mod.marketplace_source_path("keep-market")))
 
 
+class LauncherTests(unittest.TestCase):
+    """双击启动器必须同时支持「命令行用法」。
+
+    历史 bug：两个启动器都把 menu 写死、从不转发参数，于是
+    `wbclean.bat scan` / `./wbclean.command scan` 一律弹交互菜单。
+    """
+
+    def setUp(self):
+        self.root = os.path.dirname(HERE)
+
+    def _read(self, name):
+        with open(os.path.join(self.root, name), "rb") as f:
+            return f.read()
+
+    def test_windows_launcher_forwards_arguments(self):
+        bat = self._read("wbclean.bat").decode("ascii")
+        self.assertIn("%*", bat, "没把 %* 转给 Python，参数会丢")
+        self.assertIn('if "%~1"==""', bat, "缺「有参数 / 双击」分流")
+
+    def test_windows_launcher_stays_ascii_and_crlf(self):
+        """OEM 代码页会把中文搞乱，所以 .bat 必须纯 ASCII + CRLF。"""
+        raw = self._read("wbclean.bat")
+        self.assertTrue(all(b < 128 for b in raw), "wbclean.bat 混进了非 ASCII 字符")
+        self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"), "wbclean.bat 混进了裸 LF")
+
+    def test_macos_launcher_forwards_arguments(self):
+        cmd = self._read("wbclean.command").decode("utf-8")
+        self.assertIn('"$@"', cmd, "没把 $@ 转给 Python，参数会丢")
+
+    def test_macos_launcher_skips_clear_in_cli_mode(self):
+        """命令行模式不能 clear —— 会把上一条命令的输出抹掉。"""
+        cmd = self._read("wbclean.command").decode("utf-8")
+        cli_branch = cmd.split('exec "$WBCLEAN" "$@"')[0]
+        self.assertIn('[ "$#" -gt 0 ]', cli_branch)
+        self.assertNotIn("clear", cli_branch)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
