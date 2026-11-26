@@ -51,8 +51,8 @@ jobs:
         timeout-minutes: 2
         run: |
           wbclean.bat --version < nul > launcher.txt 2>&1
-          type launcher.txt
-          findstr /B /C:"wbclean " launcher.txt >nul || exit /b 1
+          rem 用 findstr 直接打印命中的那一行，日志里才有证据可看
+          findstr /B /C:"wbclean " launcher.txt || exit /b 1
 
       - name: 启动器自检（macOS，参数必须转发到 CLI）
         if: runner.os == 'macOS'
