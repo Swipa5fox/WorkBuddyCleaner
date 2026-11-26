@@ -299,6 +299,21 @@ class WindowsPathKeyTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+    def test_reverse_merges_timestamp_after_leaf_deleted(self):
+        """叶子目录删了，时间戳那段仍要合回去 —— 靠「父目录存在 + 时间戳形状」。"""
+        if not mod.IS_WIN:
+            self.skipTest("反解只在 Windows 上有真实盘符路径可验")
+        root = tempfile.mkdtemp(prefix="wbrev")
+        try:
+            ws = os.path.join(root, "WorkBuddy", "2026-10-01-15-46-26")
+            os.makedirs(ws)
+            key = self.key(ws)
+            os.rmdir(ws)  # 工作空间删了，projects 下的历史目录还在
+            self.assertEqual(mod.path_from_project_key(key, is_win=True), ws)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class NormPathTests(unittest.TestCase):
     """路径归一化 —— 会话归属统计能不能算准全靠它。"""
 
@@ -613,7 +628,7 @@ class HistorySourcePathTests(unittest.TestCase):
         self.assertFalse(hit[0]["deletable"], "目标还在就不能删历史")
 
     def test_rejects_path_that_does_not_roundtrip(self):
-        """文件里的路径编码后对不上目录名 —— 不采信，保持保守。"""
+        """文件里的路径编码后对不上目录名 —— 这条证据不采信，保持保守。"""
         gone = os.path.join(self.tmp, "gonedir")
         d = self._hist(gone, folder_in_file="/somewhere/else/entirely")
 
@@ -624,9 +639,14 @@ class HistorySourcePathTests(unittest.TestCase):
 
         hit = [r for r in rows if r["name"] == os.path.basename(d)]
         self.assertEqual(len(hit), 1)
-        self.assertIsNone(hit[0]["source_path"], "对不上就不能拿来当删除依据")
-        self.assertEqual(hit[0]["source_state"], "suspect")
-        self.assertFalse(hit[0]["deletable"])
+        # 核心不变式：错的那条路径绝不能变成删除依据
+        self.assertNotEqual(hit[0]["source_path"], "/somewhere/else/entirely")
+        self.assertNotEqual(hit[0]["source_origin"], "history")
+        if not mod.IS_WIN:
+            # macOS 反解必然为空，只剩「疑似离线」这一种结论
+            self.assertIsNone(hit[0]["source_path"])
+            self.assertEqual(hit[0]["source_state"], "suspect")
+            self.assertFalse(hit[0]["deletable"])
 
     def test_sessions_takes_precedence(self):
         """sessions.cwd 有记录时优先用它，不去读文件。"""
