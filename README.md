@@ -4,7 +4,6 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.7%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
-![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 
 > **WorkBuddy 清理器** —— 清掉侧边栏里那些「本地文件夹已经不存在」的空壳工作空间条目。
 > 命令行工具名：`wbclean`
@@ -646,7 +645,7 @@ WorkBuddy 在 Windows 上会常驻托盘，**右键托盘图标 → 退出**，
 | 项 | 状态 |
 | :--- | :--- |
 | macOS | 支持（主要开发与测试平台） |
-| Windows | 支持（Windows 10 / 11，进程检测走 Win32 API，无需 `lsof`） |
+| Windows | 支持（Windows 10 / 11，进程检测走 Win32 API，无需 `lsof`）；CI 覆盖到启动器真跑，未在真机长期验证 |
 | Linux | 理论可用，未实测（发布包用 `wbclean-1.5-macos.tar.gz` 那份） |
 | Python | 3.7 及以上（CI 覆盖 3.9 与 3.13） |
 | 第三方依赖 | 无 |
